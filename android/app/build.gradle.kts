@@ -4,9 +4,24 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+val generatedBridgeAssetsDir = layout.buildDirectory.dir("generated/bridgeAssets")
+
+val syncBridgeAssets by tasks.registering(Copy::class) {
+    from(rootProject.file("../bridge")) {
+        include("core.py", "server.py")
+    }
+    into(generatedBridgeAssetsDir.map { it.dir("bridge") })
+}
+
 android {
     namespace = "com.tabletagent.local"
     compileSdk = 35
+
+    sourceSets {
+        getByName("main") {
+            assets.srcDir(generatedBridgeAssetsDir)
+        }
+    }
 
     defaultConfig {
         applicationId = "com.tabletagent.local"
@@ -44,4 +59,8 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("org.apache.commons:commons-compress:1.26.1")
     debugImplementation("androidx.compose.ui:ui-tooling")
+}
+
+tasks.named("preBuild") {
+    dependsOn(syncBridgeAssets)
 }

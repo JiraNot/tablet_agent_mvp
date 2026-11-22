@@ -1,0 +1,358 @@
+package com.tabletagent.local.runtime
+
+import android.content.Context
+import android.util.Base64
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import java.io.BufferedReader
+import java.io.File
+import java.io.InputStreamReader
+import java.io.OutputStreamWriter
+
+data class CliAuthState(
+    val signedIn: Boolean = false,
+    val method: String = "none",
+    val label: String = "Not signed in"
+)
+
+data class AllCliAuthStatus(
+    val codex: CliAuthState = CliAuthState(),
+    val agy: CliAuthState = CliAuthState(),
+    val claude: CliAuthState = CliAuthState()
+)
+
+data class OAuthSessionState(
+    val cliType: String = "",
+    val active: Boolean = false,
+    val oauthUrl: String = "",
+    val deviceCode: String = "",
+    val needsCodePaste: Boolean = false,
+    val logs: List<String> = emptyList(),
+    val completed: Boolean = false,
+    val error: String = ""
+)
+
+/**
+ * Manages authentication status checks, API key provisioning, and interactive
+ * browser OAuth / Device-Code sign-in inside the embedded PRoot runtime.
+ */
+object CliAuthManager {
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val ansiRegex = Regex("\\u001B\\[[;?0-9]*[a-zA-Z]|\\u001B\\].*?\\u0007|\\r")
+    private val urlRegex = Regex("""https://[^\s"'<>()]+""")
+    private val deviceCodeRegex = Regex("""\b([A-Z0-9]{4}-[A-Z0-9]{4,5})\b""")
+
+    private val _oauthState = MutableStateFlow(OAuthSessionState())
+    val oauthState: StateFlow<OAuthSessionState> = _oauthState.asStateFlow()
+
+    @Volatile
+    private var activeProcess: Process? = null
+
+    suspend fun getAuthStatus(context: Context): AllCliAuthStatus = withContext(Dispatchers.IO) {
+        if (!BootstrapManager.isReady(context)) return@withContext AllCliAuthStatus()
+
+        val hasOpenAiKey = SecureSecrets.hasKey(context, SecureSecrets.KEY_OPENAI)
+        val hasAnthropicKey = SecureSecrets.hasKey(context, SecureSecrets.KEY_ANTHROPIC)
+        val hasGeminiKey = SecureSecrets.hasKey(context, SecureSecrets.KEY_GEMINI)
+
+        val codexStatus = checkCodexAuth(context, hasOpenAiKey)
+        val claudeStatus = checkClaudeAuth(context, hasAnthropicKey)
+        val agyStatus = checkAgyAuth(context, hasGeminiKey)
+
+        AllCliAuthStatus(codex = codexStatus, agy = agyStatus, claude = claudeStatus)
+    }
+
+    private suspend fun checkCodexAuth(context: Context, hasApiKey: Boolean): CliAuthState {
+        val res = EmbeddedProcessRunner.execute(context, "codex login status 2>&1", timeoutMs = 8000L)
+        val out = res.stdout.trim()
+        val loggedIn = res.exitCode == 0 && out.contains("Logged in", ignoreCase = true) &&
+            !out.contains("Not logged in", ignoreCase = true)
+        return when {
+            loggedIn -> CliAuthState(true, "oauth", out.lines().firstOrNull() ?: "Signed in")
+            hasApiKey -> CliAuthState(true, "api_key", "API Key configured")
+            else -> CliAuthState(false, "none", "Not signed in")
+        }
+    }
+
+    private suspend fun checkClaudeAuth(context: Context, hasApiKey: Boolean): CliAuthState {
+        val res = EmbeddedProcessRunner.execute(context, "claude auth status 2>&1", timeoutMs = 8000L)
+        val parsed = runCatching { JSONObject(res.stdout.trim()) }.getOrNull()
+        val loggedIn = parsed?.optBoolean("loggedIn", false) == true
+        val method = parsed?.optString("authMethod", "oauth") ?: "oauth"
+        return when {
+            loggedIn -> CliAuthState(true, method, "Signed in ($method)")
+            hasApiKey -> CliAuthState(true, "api_key", "API Key configured")
+            else -> CliAuthState(false, "none", "Not signed in")
+        }
+    }
+
+    private suspend fun checkAgyAuth(context: Context, hasApiKey: Boolean): CliAuthState {
+        val rootfs = BootstrapManager.getRootfsDir(context)
+        val hasCredFiles = listOf(
+            File(rootfs, "root/.antigravity"),
+            File(rootfs, "root/.config/antigravity"),
+            File(rootfs, "root/.gemini")
+        ).any { dir ->
+            dir.isDirectory && (dir.walkTopDown().any { it.isFile && it.name.contains("oauth", ignoreCase = true) || it.name.contains("cred", ignoreCase = true) || it.name.contains("token", ignoreCase = true) })
+        }
+
+        if (hasCredFiles) {
+            val res = EmbeddedProcessRunner.execute(context, "agy models 2>&1", timeoutMs = 8000L)
+            if (res.exitCode == 0 && !res.stdout.contains("Please sign in", ignoreCase = true)) {
+                return CliAuthState(true, "oauth", "Google OAuth signed in")
+            }
+        }
+        return if (hasApiKey) {
+            CliAuthState(true, "api_key", "API Key configured")
+        } else {
+            CliAuthState(false, "none", "Not signed in")
+        }
+    }
+
+    /** Save an API key securely in KeyStore, bind Codex token if applicable, and restart bridge. */
+    suspend fun saveProviderApiKey(
+        context: Context,
+        envName: String,
+        value: String
+    ): Result<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            val trimmed = value.trim()
+            SecureSecrets.saveKey(context, envName, trimmed)
+
+            if (envName == SecureSecrets.KEY_OPENAI) {
+                if (trimmed.isNotBlank()) {
+                    // Feed API key via process environment stdin so it never appears in ps/args/logs.
+                    val proc = EmbeddedProcessRunner.startDaemon(
+                        context = context,
+                        command = "printenv OPENAI_API_KEY | codex login --with-api-key",
+                        extraEnv = mapOf(SecureSecrets.KEY_OPENAI to trimmed)
+                    )
+                    proc.waitFor()
+                } else {
+                    EmbeddedProcessRunner.execute(context, "codex logout 2>&1", timeoutMs = 8000L)
+                }
+            }
+
+            if (BootstrapManager.isReady(context)) {
+                EmbeddedBridgeManager.restart(context)
+            }
+
+            if (trimmed.isBlank()) "$envName cleared" else "$envName saved to KeyStore & synced"
+        }
+    }
+
+    suspend fun logoutCli(context: Context, cliType: String): Result<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            when (cliType) {
+                "Codex" -> EmbeddedProcessRunner.execute(context, "codex logout 2>&1", timeoutMs = 8000L)
+                "Claude" -> EmbeddedProcessRunner.execute(context, "claude auth logout 2>&1", timeoutMs = 8000L)
+                "AGY" -> {
+                    val rootfs = BootstrapManager.getRootfsDir(context)
+                    listOf("root/.antigravity", "root/.config/antigravity", "root/.gemini").forEach { rel ->
+                        File(rootfs, rel).deleteRecursively()
+                    }
+                }
+            }
+            "$cliType signed out"
+        }
+    }
+
+    fun startOAuthLogin(context: Context, cliType: String) {
+        cancelOAuth()
+        if (!BootstrapManager.isReady(context)) {
+            _oauthState.value = OAuthSessionState(cliType = cliType, error = "Embedded runtime is not ready")
+            return
+        }
+
+        _oauthState.value = OAuthSessionState(
+            cliType = cliType,
+            active = true,
+            needsCodePaste = (cliType == "Claude" || cliType == "AGY"),
+            logs = listOf("Starting $cliType authentication in PRoot...")
+        )
+
+        scope.launch {
+            val rootfs = BootstrapManager.getRootfsDir(context)
+            val tmpDir = File(rootfs, "tmp").apply { mkdirs() }
+            val urlFile = File(tmpDir, "oauth_url.txt").apply { delete() }
+            val browserShim = File(tmpDir, "oauth_capture.sh").apply {
+                writeText("#!/bin/sh\nprintf '%s\\n' \"\$1\" > /tmp/oauth_url.txt\n")
+                setExecutable(true, false)
+            }
+
+            val command = when (cliType) {
+                "Codex" -> "codex login --device-auth"
+                "Claude" -> buildPtyWrapperCommand("claude auth login")
+                "AGY" -> buildPtyWrapperCommand("agy", autoSelectEnterPrompt = "Google OAuth")
+                else -> {
+                    _oauthState.value = _oauthState.value.copy(active = false, error = "Unknown CLI: $cliType")
+                    return@launch
+                }
+            }
+
+            val proc = try {
+                EmbeddedProcessRunner.startDaemon(
+                    context = context,
+                    command = command,
+                    workingDir = "/root",
+                    extraEnv = mapOf("BROWSER" to "/tmp/${browserShim.name}")
+                )
+            } catch (e: Exception) {
+                _oauthState.value = _oauthState.value.copy(active = false, error = e.message ?: "Failed to launch auth")
+                return@launch
+            }
+            activeProcess = proc
+
+            // Poll /tmp/oauth_url.txt captured from $BROWSER shim for clean unwrapped URLs.
+            val urlWatcher = launch {
+                while (isActive && proc.isAlive) {
+                    if (urlFile.isFile) {
+                        val captured = runCatching { urlFile.readText(Charsets.UTF_8).trim() }.getOrDefault("")
+                        if (captured.startsWith("https://") && _oauthState.value.oauthUrl != captured) {
+                            _oauthState.value = _oauthState.value.copy(oauthUrl = captured)
+                        }
+                    }
+                    delay(250)
+                }
+            }
+
+            runCatching {
+                BufferedReader(InputStreamReader(proc.inputStream)).use { reader ->
+                    var line: String?
+                    while (reader.readLine().also { line = it } != null) {
+                        val clean = ansiRegex.replace(line ?: "", "").trim()
+                        if (clean.isEmpty()) continue
+
+                        var next = _oauthState.value
+                        val matchedUrl = urlRegex.find(clean)?.value
+                        if (matchedUrl != null && next.oauthUrl.isBlank()) {
+                            next = next.copy(oauthUrl = matchedUrl)
+                        }
+                        if (cliType == "Codex") {
+                            val codeMatch = deviceCodeRegex.find(clean)
+                            if (codeMatch != null) {
+                                next = next.copy(deviceCode = codeMatch.groupValues[1])
+                            }
+                        }
+                        if (clean.contains("Paste code", ignoreCase = true) ||
+                            clean.contains("verification code", ignoreCase = true)
+                        ) {
+                            next = next.copy(needsCodePaste = true)
+                        }
+                        next = next.copy(logs = (next.logs + clean).takeLast(14))
+                        _oauthState.value = next
+                    }
+                }
+            }
+
+            val exitCode = runCatching { proc.waitFor() }.getOrDefault(-1)
+            urlWatcher.cancel()
+            if (activeProcess === proc) activeProcess = null
+
+            val cur = _oauthState.value
+            if (cur.active) {
+                if (exitCode == 0) {
+                    _oauthState.value = cur.copy(active = false, completed = true)
+                    EmbeddedBridgeManager.restart(context)
+                } else {
+                    _oauthState.value = cur.copy(
+                        active = false,
+                        error = cur.error.ifBlank { "Sign-in did not complete (exit $exitCode)" }
+                    )
+                }
+            }
+        }
+    }
+
+    fun submitPastedCode(code: String) {
+        val proc = activeProcess ?: return
+        val trimmed = code.trim()
+        if (trimmed.isEmpty()) return
+        scope.launch {
+            runCatching {
+                OutputStreamWriter(proc.outputStream, Charsets.UTF_8).apply {
+                    write(trimmed + "\n")
+                    flush()
+                }
+            }
+        }
+    }
+
+    fun cancelOAuth() {
+        val proc = activeProcess
+        activeProcess = null
+        if (proc != null) {
+            runCatching { proc.destroy() }
+            runCatching { if (proc.isAlive) proc.destroyForcibly() }
+        }
+        _oauthState.value = OAuthSessionState()
+    }
+
+    /**
+     * Spawns interactive CLI inside a 240-column Linux PTY so prompts/URLs render
+     * without wrapping and Android can feed stdin verification codes cleanly.
+     */
+    private fun buildPtyWrapperCommand(cliCommand: String, autoSelectEnterPrompt: String? = null): String {
+        val promptLiteral = if (autoSelectEnterPrompt != null) {
+            Base64.encodeToString(autoSelectEnterPrompt.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+        } else ""
+        val pyScript = """
+import base64, fcntl, os, pty, select, signal, struct, sys, termios, time
+pid, fd = pty.fork()
+if pid == 0:
+    os.execvp('/bin/bash', ['/bin/bash', '-c', '$cliCommand'])
+try:
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', 40, 240, 0, 0))
+except Exception:
+    pass
+prompt_b = base64.b64decode('$promptLiteral') if '$promptLiteral' else b''
+sent_enter = False
+buf_acc = b''
+while True:
+    rlist = [fd]
+    if not sys.stdin.closed:
+        rlist.append(0)
+    try:
+        r, _, _ = select.select(rlist, [], [], 0.25)
+    except Exception:
+        break
+    if fd in r:
+        try:
+            data = os.read(fd, 4096)
+        except OSError:
+            break
+        if not data:
+            break
+        os.write(1, data)
+        if prompt_b and not sent_enter:
+            buf_acc = (buf_acc + data)[-4096:]
+            if prompt_b in buf_acc:
+                sent_enter = True
+                time.sleep(0.35)
+                try:
+                    os.write(fd, b'\r')
+                except OSError:
+                    pass
+    if 0 in r:
+        try:
+            inp = os.read(0, 1024)
+            if inp:
+                os.write(fd, inp)
+        except OSError:
+            pass
+_, status = os.waitpid(pid, 0)
+sys.exit(os.waitstatus_to_exitcode(status) if hasattr(os, 'waitstatus_to_exitcode') else (status >> 8))
+""".trimIndent()
+        val encoded = Base64.encodeToString(pyScript.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+        return "echo $encoded | base64 -d | python3 -u"
+    }
+}

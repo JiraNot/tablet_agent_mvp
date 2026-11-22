@@ -42,10 +42,18 @@ class AdapterTests(unittest.TestCase):
 
         agy = AntigravityAdapter()
         cmd_agy = agy.build_cmd(p, 'Antigravity task', 'build', thread_id='ag-789', model='gemini-2.5-pro')
-        self.assertIn('--session', cmd_agy)
+        self.assertIn('--print', cmd_agy)
+        self.assertIn('stream-json', cmd_agy)
+        self.assertIn('--mode', cmd_agy)
+        self.assertIn('accept-edits', cmd_agy)
+        self.assertIn('--conversation', cmd_agy)
         self.assertIn('ag-789', cmd_agy)
         self.assertIn('--model', cmd_agy)
         self.assertIn('gemini-2.5-pro', cmd_agy)
+
+        cmd_agy_plan = agy.build_cmd(p, 'Plan task', 'plan')
+        self.assertIn('plan', cmd_agy_plan)
+        self.assertNotIn('--conversation', cmd_agy_plan)
 
     def test_available_agents_api(self):
         agents = self.core.available_agents()
@@ -87,6 +95,30 @@ class AdapterTests(unittest.TestCase):
         names = [a['name'] for a in data['agents']]
         self.assertIn('codex', names)
         self.assertIn('claude', names)
+
+    def test_stream_json_parsing_for_claude_and_agy(self):
+        import sys as _sys
+        script = (
+            'import json; '
+            'print(json.dumps({"type":"system","session_id":"sess-abc12345"})); '
+            'print(json.dumps({"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit"},{"type":"text","text":"Updated layout cleanly."}]}})); '
+            'print(json.dumps({"type":"result","subtype":"success","session_id":"sess-abc12345","result":"Updated layout cleanly."}))'
+        )
+        tid = 'test-stream-json-1'
+        with self.core._db() as db:
+            db.execute(
+                'INSERT INTO tasks(id,project,prompt,agent,mode,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)',
+                (tid, 'proj', 'Plan UI', 'antigravity', 'plan', 'PLANNING', 0.0, 0.0)
+            )
+        rc, out = self.core._run(tid, [_sys.executable, '-c', script], self.core._project('proj'), timeout=10, phase='agent')
+        self.assertEqual(rc, 0)
+        self.assertIn('Updated layout cleanly.', out)
+        self.assertEqual(self.core.thread_candidates.get(tid), 'sess-abc12345')
+        evts = self.core.events(tid, 0)
+        kinds = [e['kind'] for e in evts]
+        self.assertIn('thread', kinds)
+        self.assertIn('tool', kinds)
+        self.assertIn('message', kinds)
 
 if __name__ == '__main__':
     unittest.main()

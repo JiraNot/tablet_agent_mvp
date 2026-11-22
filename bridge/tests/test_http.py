@@ -49,4 +49,11 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(res3['file'], 'AGENTS.md')
         self.assertIn('Rule 1', res3['content'])
 
+    def test_health_reports_runtime(self):
+        with urlopen(self.base + '/health', timeout=4) as resp:
+            self.assertEqual(resp.status, 200)
+            data = json.loads(resp.read())
+            self.assertTrue(data['ok'])
+            self.assertIn(data.get('runtime'), {'termux', 'embedded'})
+
 if __name__=='__main__':unittest.main()

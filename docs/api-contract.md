@@ -4,7 +4,7 @@
 
 | Method | Endpoint | Result |
 |---|---|---|
-| GET | `/health` | service health without credentials |
+| GET | `/health` | service health without credentials (`{ok, service, version, runtime}`) |
 | GET | `/v1/projects` | locally available workspaces |
 | POST | `/v1/projects` | `{name, git_url?}`, create/clone |
 | GET | `/v1/projects/{name}/files?path=.` | safe directory list |

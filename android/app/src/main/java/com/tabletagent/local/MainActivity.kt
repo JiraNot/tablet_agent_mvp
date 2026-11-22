@@ -27,12 +27,21 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import com.tabletagent.local.runtime.AllCliAuthStatus
 import com.tabletagent.local.runtime.BootstrapManager
 import com.tabletagent.local.runtime.BootstrapStatus
+import com.tabletagent.local.runtime.CliAuthManager
 import com.tabletagent.local.runtime.CliInstaller
 import com.tabletagent.local.runtime.CliVersions
+import com.tabletagent.local.runtime.EmbeddedBridgeManager
+import com.tabletagent.local.runtime.EmbeddedBridgeStatus
 import com.tabletagent.local.runtime.ExecutionResult
+import com.tabletagent.local.runtime.ProviderKeySummary
+import com.tabletagent.local.runtime.SecureSecrets
+import com.tabletagent.local.ui.CliOAuthDialog
+import com.tabletagent.local.ui.OfficialCliCard
 import com.tabletagent.local.ui.PhaseStepperBar
+import com.tabletagent.local.ui.ProviderApiKeysCard
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -72,7 +81,10 @@ fun TabletAgentApp() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var token by remember { mutableStateOf(SecureDeviceToken.get(context)) }
-    val api = remember(token) { LocalApi(token) }
+    val bridgeStatus by EmbeddedBridgeManager.status.collectAsState()
+    val bridgePort by EmbeddedBridgeManager.port.collectAsState()
+    val api = remember(token, bridgePort) { LocalApi(token, bridgePort) }
+    var bridgeRuntime by remember { mutableStateOf("") }
     var tab by rememberSaveable { mutableIntStateOf(0) }
     var online by remember { mutableStateOf(false) }
     var projects by remember { mutableStateOf<List<JSONObject>>(emptyList()) }
@@ -102,13 +114,32 @@ fun TabletAgentApp() {
     val isRuntimeReady = remember(bootstrapStatus) { BootstrapManager.isReady(context) }
     var cliVersions by remember { mutableStateOf<CliVersions?>(null) }
     var installingCli by remember { mutableStateOf<String?>(null) }
+    val oauthState by CliAuthManager.oauthState.collectAsState()
+    var cliAuthStatus by remember { mutableStateOf(AllCliAuthStatus()) }
+    var keySummary by remember { mutableStateOf(SecureSecrets.getSummary(context)) }
+    var authBusy by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         if (!BootstrapManager.isReady(context)) {
             BootstrapManager.bootstrapIfNeeded(context)
+        } else {
+            BootstrapManager.ensureRuntimeDirs(context)
         }
         if (BootstrapManager.isReady(context)) {
+            val ensured = EmbeddedBridgeManager.ensureDeviceToken(context)
+            if (ensured.isNotBlank()) {
+                token = ensured
+                tokenEntry = ensured
+            }
+            EmbeddedBridgeManager.startIfNeeded(context)
             cliVersions = CliInstaller.getInstalledVersions(context)
+            cliAuthStatus = CliAuthManager.getAuthStatus(context)
+        }
+    }
+
+    LaunchedEffect(oauthState.completed) {
+        if (oauthState.completed && BootstrapManager.isReady(context)) {
+            cliAuthStatus = CliAuthManager.getAuthStatus(context)
         }
     }
 
@@ -124,9 +155,11 @@ fun TabletAgentApp() {
         eventCursor = 0
     }
     // Reconnect/poll on-device: no remote server or external networking.
-    LaunchedEffect(token, selectedProject, selectedTask) {
+    LaunchedEffect(token, bridgePort, selectedProject, selectedTask) {
         while (isActive) {
-            online = api.health()
+            val healthObj = api.healthInfo()
+            online = healthObj != null
+            bridgeRuntime = healthObj?.optString("runtime", "") ?: ""
             if (online && token.isNotBlank()) {
                 try {
                     runCatching { availableAgents = api.agents().objects() }
@@ -200,7 +233,13 @@ fun TabletAgentApp() {
                         Spacer(Modifier.width(6.dp))
                     }
                     Text(
-                        if (online) "Bridge connected" else if (isRuntimeReady) "Standalone runtime ready" else "Bridge offline",
+                        when {
+                            online && bridgeRuntime == "embedded" -> "Embedded Bridge (:$bridgePort)"
+                            online -> "Termux Bridge (:$bridgePort)"
+                            bridgeStatus is EmbeddedBridgeStatus.Starting -> "Starting embedded bridge..."
+                            isRuntimeReady -> "Standalone runtime ready"
+                            else -> "Bridge offline"
+                        },
                         style = MaterialTheme.typography.labelSmall,
                         color = if (online || isRuntimeReady) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
                     )
@@ -314,7 +353,8 @@ fun TabletAgentApp() {
                     onDeny = { aid -> scope.launch { runCatching {
                         api.respondApproval(selectedTask, aid, false)
                         approvals = api.approvals(selectedTask).objects()
-                    }.onFailure { notify(it) } } }
+                    }.onFailure { notify(it) } } },
+                    onCommitClick = { gitReviewDialog = true }
                             )
                         }
                         Box(Modifier.weight(.49f).fillMaxHeight()) { PreviewScreen(previewUrl, previewState,
@@ -350,7 +390,8 @@ fun TabletAgentApp() {
                         onDeny = { aid -> scope.launch { runCatching {
                             api.respondApproval(selectedTask, aid, false)
                             approvals = api.approvals(selectedTask).objects()
-                        }.onFailure { notify(it) } } }
+                        }.onFailure { notify(it) } } },
+                        onCommitClick = { gitReviewDialog = true }
                     )
                 }
                 1 -> PreviewScreen(previewUrl, previewState,
@@ -371,12 +412,31 @@ fun TabletAgentApp() {
                     onToken = { tokenEntry = it },
                     onSave = {
                         try {
-                            SecureDeviceToken.save(context, tokenEntry.trim())
-                            token = tokenEntry.trim(); error = "Device token saved"
+                            val trimmed = tokenEntry.trim()
+                            SecureDeviceToken.save(context, trimmed)
+                            EmbeddedBridgeManager.syncTokenFile(context, trimmed)
+                            token = trimmed
+                            error = "Device token saved"
+                            scope.launch {
+                                if (BootstrapManager.isReady(context)) {
+                                    EmbeddedBridgeManager.restart(context)
+                                }
+                            }
                         } catch (e: Exception) { notify(e) }
                     },
                     onStart = { error = TermuxLauncher.startBridge(context) },
+                    onRestartEmbedded = {
+                        scope.launch {
+                            error = "Restarting embedded PRoot bridge..."
+                            val ok = EmbeddedBridgeManager.restart(context)
+                            error = if (ok) "Embedded PRoot bridge active on 127.0.0.1:${EmbeddedBridgeManager.port.value}"
+                            else "Embedded bridge failed to start"
+                        }
+                    },
                     online = online,
+                    bridgeRuntime = bridgeRuntime,
+                    bridgePort = bridgePort,
+                    bridgeStatus = bridgeStatus,
                     agents = availableAgents,
                     selectedProject = selectedProject,
                     api = api,
@@ -397,14 +457,53 @@ fun TabletAgentApp() {
                                 notify(e)
                             } finally {
                                 cliVersions = CliInstaller.getInstalledVersions(context)
+                                cliAuthStatus = CliAuthManager.getAuthStatus(context)
                                 installingCli = null
                             }
+                        }
+                    },
+                    cliAuthStatus = cliAuthStatus,
+                    keySummary = keySummary,
+                    authBusy = authBusy,
+                    onSignInCli = { cliType -> CliAuthManager.startOAuthLogin(context, cliType) },
+                    onSignOutCli = { cliType ->
+                        scope.launch {
+                            authBusy = true
+                            CliAuthManager.logoutCli(context, cliType)
+                                .onSuccess { error = it }
+                                .onFailure { notify(it) }
+                            cliAuthStatus = CliAuthManager.getAuthStatus(context)
+                            authBusy = false
+                        }
+                    },
+                    onSaveProviderKey = { envName, value ->
+                        scope.launch {
+                            authBusy = true
+                            CliAuthManager.saveProviderApiKey(context, envName, value)
+                                .onSuccess {
+                                    error = it
+                                    keySummary = SecureSecrets.getSummary(context)
+                                }
+                                .onFailure { notify(it) }
+                            cliAuthStatus = CliAuthManager.getAuthStatus(context)
+                            authBusy = false
                         }
                     },
                     notify = notify
                 )
             }
         }
+    }
+    if (oauthState.cliType.isNotBlank()) {
+        CliOAuthDialog(
+            state = oauthState,
+            onSubmitCode = { CliAuthManager.submitPastedCode(it) },
+            onCancel = { CliAuthManager.cancelOAuth() },
+            onDone = {
+                CliAuthManager.cancelOAuth()
+                scope.launch { cliAuthStatus = CliAuthManager.getAuthStatus(context) }
+            }
+        )
     }
     if (createDialog) {
         var name by remember { mutableStateOf("") }
@@ -441,7 +540,8 @@ private fun AgentScreen(prompt: String, onPrompt: (String) -> Unit, mode: String
                         tasks: List<JSONObject>, selectedTask: String, onSelectTask: (String) -> Unit,
                         events: List<JSONObject>, approvals: List<JSONObject> = emptyList(),
                         canRun: Boolean, onSend: () -> Unit, onCancel: () -> Unit,
-                        onApprove: (String) -> Unit = {}, onDeny: (String) -> Unit = {}) {
+                        onApprove: (String) -> Unit = {}, onDeny: (String) -> Unit = {},
+                        onCommitClick: () -> Unit = {}) {
     Column(Modifier.fillMaxSize()) {
         val pendingApproval = approvals.firstOrNull { it.optString("status") == "PENDING" }
         if (pendingApproval != null) {
@@ -639,7 +739,8 @@ private fun AgentScreen(prompt: String, onPrompt: (String) -> Unit, mode: String
         if (selectedTask.isNotBlank() && currentTaskStatus.isNotBlank()) {
             PhaseStepperBar(
                 state = currentTaskStatus,
-                modifier = Modifier.padding(bottom = 8.dp)
+                modifier = Modifier.padding(bottom = 8.dp),
+                onCommitClick = onCommitClick
             )
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -840,13 +941,23 @@ private fun SettingsScreen(
     onToken: (String) -> Unit,
     onSave: () -> Unit,
     onStart: () -> Unit,
+    onRestartEmbedded: () -> Unit = {},
     online: Boolean,
+    bridgeRuntime: String = "",
+    bridgePort: Int = 8765,
+    bridgeStatus: EmbeddedBridgeStatus = EmbeddedBridgeStatus.Stopped,
     agents: List<JSONObject> = emptyList(),
     selectedProject: String = "",
     api: LocalApi? = null,
     cliVersions: CliVersions? = null,
     installingCli: String? = null,
     onInstallCli: (String) -> Unit = {},
+    cliAuthStatus: AllCliAuthStatus = AllCliAuthStatus(),
+    keySummary: ProviderKeySummary = ProviderKeySummary(),
+    authBusy: Boolean = false,
+    onSignInCli: (String) -> Unit = {},
+    onSignOutCli: (String) -> Unit = {},
+    onSaveProviderKey: (String, String) -> Unit = { _, _ -> },
     notify: (Throwable) -> Unit = {}
 ) {
     val context = LocalContext.current
@@ -933,29 +1044,54 @@ private fun SettingsScreen(
                                 color = MaterialTheme.colorScheme.onPrimaryContainer
                             )
                         }
+                        Spacer(Modifier.height(4.dp))
+                        val bridgeLabel = when {
+                            online && bridgeRuntime == "embedded" -> "Embedded Bridge Online (127.0.0.1:$bridgePort)"
+                            bridgeStatus is EmbeddedBridgeStatus.Starting -> "Starting Embedded PRoot Bridge..."
+                            bridgeStatus is EmbeddedBridgeStatus.Error -> "Embedded Bridge Error: ${bridgeStatus.message}"
+                            else -> "Embedded Bridge Standby (127.0.0.1:$bridgePort)"
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                bridgeLabel,
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                modifier = Modifier.weight(1f)
+                            )
+                            FilledTonalButton(onClick = onRestartEmbedded) {
+                                Icon(Icons.Default.Refresh, null, Modifier.size(16.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text(if (online && bridgeRuntime == "embedded") "Restart Bridge" else "Start Embedded Bridge")
+                            }
+                        }
                     }
                 }
 
                 Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = MaterialTheme.shapes.medium) {
                     Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(if (online) Icons.Default.CheckCircle else Icons.Default.Error, null,
-                                tint = if (online) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
+                            Icon(if (online) Icons.Default.CheckCircle else Icons.Default.Info, null,
+                                tint = if (online) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline)
                             Spacer(Modifier.width(8.dp))
                             Text(
-                                if (online) "Termux Bridge Online (127.0.0.1:8765)" else "Termux Bridge Offline (Optional)",
+                                when {
+                                    online && bridgeRuntime == "embedded" -> "Active Mode: Zero-Termux Embedded Bridge (:$bridgePort)"
+                                    online -> "Active Mode: External Termux Bridge (:$bridgePort)"
+                                    else -> "Loopback Bridge Offline"
+                                },
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold
                             )
                         }
-                        Text("Loopback bridge fallback for backward compatibility with external Termux sessions.", style = MaterialTheme.typography.bodySmall)
+                        Text("Optional external Termux bridge fallback; primary workspace runs natively inside Embedded PRoot.", style = MaterialTheme.typography.bodySmall)
                     }
                 }
 
                 OutlinedTextField(
                     value = tokenEntry,
                     onValueChange = onToken,
-                    label = { Text("Device Token (stored in Android KeyStore)") },
+                    label = { Text("Device Token (Auto-synced in KeyStore)") },
                     visualTransformation = PasswordVisualTransformation(),
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true
@@ -970,61 +1106,55 @@ private fun SettingsScreen(
                     OutlinedButton(onClick = onStart) {
                         Icon(Icons.Default.PlayArrow, null, Modifier.size(16.dp))
                         Spacer(Modifier.width(6.dp))
-                        Text("Start Bridge via Termux")
+                        Text("Termux Fallback")
                     }
                 }
             }
 
             1 -> {
-                Text("Official Agent CLIs (Embedded PRoot)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Text("Official Agent CLIs & Auth (Embedded PRoot)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
 
-                // Codex CLI Card
-                Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = MaterialTheme.shapes.small, modifier = Modifier.fillMaxWidth()) {
-                    Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text("OpenAI Codex CLI", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
-                            Text(cliVersions?.codex ?: "curl -fsSL https://chatgpt.com/codex/install.sh | sh", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
-                        }
-                        Button(
-                            onClick = { onInstallCli("Codex") },
-                            enabled = installingCli == null
-                        ) {
-                            Text(if (installingCli == "Codex") "Installing..." else if (cliVersions?.codex != null) "Update" else "Install")
-                        }
-                    }
-                }
+                OfficialCliCard(
+                    title = "OpenAI Codex CLI",
+                    subtitle = cliVersions?.codex ?: "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
+                    authState = cliAuthStatus.codex,
+                    isInstalled = cliVersions?.codex != null,
+                    isInstalling = installingCli == "Codex",
+                    anyInstalling = installingCli != null || authBusy,
+                    onSignIn = { onSignInCli("Codex") },
+                    onSignOut = { onSignOutCli("Codex") },
+                    onInstallOrUpdate = { onInstallCli("Codex") }
+                )
 
-                // Antigravity CLI Card
-                Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = MaterialTheme.shapes.small, modifier = Modifier.fillMaxWidth()) {
-                    Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text("Google Antigravity CLI", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
-                            Text(cliVersions?.agy ?: "curl -fsSL https://antigravity.google/cli/install.sh | bash", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
-                        }
-                        Button(
-                            onClick = { onInstallCli("AGY") },
-                            enabled = installingCli == null
-                        ) {
-                            Text(if (installingCli == "AGY") "Installing..." else if (cliVersions?.agy != null) "Update" else "Install")
-                        }
-                    }
-                }
+                OfficialCliCard(
+                    title = "Google Antigravity CLI",
+                    subtitle = cliVersions?.agy ?: "curl -fsSL https://antigravity.google/cli/install.sh | bash",
+                    authState = cliAuthStatus.agy,
+                    isInstalled = cliVersions?.agy != null,
+                    isInstalling = installingCli == "AGY",
+                    anyInstalling = installingCli != null || authBusy,
+                    onSignIn = { onSignInCli("AGY") },
+                    onSignOut = { onSignOutCli("AGY") },
+                    onInstallOrUpdate = { onInstallCli("AGY") }
+                )
 
-                // Claude Code Card
-                Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = MaterialTheme.shapes.small, modifier = Modifier.fillMaxWidth()) {
-                    Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text("Anthropic Claude Code", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
-                            Text(cliVersions?.claude ?: "curl -fsSL https://claude.ai/install.sh | bash", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
-                        }
-                        Button(
-                            onClick = { onInstallCli("Claude") },
-                            enabled = installingCli == null
-                        ) {
-                            Text(if (installingCli == "Claude") "Installing..." else if (cliVersions?.claude != null) "Update" else "Install")
-                        }
-                    }
-                }
+                OfficialCliCard(
+                    title = "Anthropic Claude Code",
+                    subtitle = cliVersions?.claude ?: "curl -fsSL https://claude.ai/install.sh | bash",
+                    authState = cliAuthStatus.claude,
+                    isInstalled = cliVersions?.claude != null,
+                    isInstalling = installingCli == "Claude",
+                    anyInstalling = installingCli != null || authBusy,
+                    onSignIn = { onSignInCli("Claude") },
+                    onSignOut = { onSignOutCli("Claude") },
+                    onInstallOrUpdate = { onInstallCli("Claude") }
+                )
+
+                ProviderApiKeysCard(
+                    summary = keySummary,
+                    busy = authBusy,
+                    onSaveKey = onSaveProviderKey
+                )
 
                 Spacer(Modifier.height(8.dp))
                 Text("Installed Agent Capabilities (Bridge):", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)

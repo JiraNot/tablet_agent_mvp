@@ -9,8 +9,8 @@ import java.net.URL
 import java.net.URLEncoder
 
 /** Restrict all API traffic to the bridge on the current Android device. */
-class LocalApi(private val deviceToken: String) {
-    private val host = "http://127.0.0.1:8765"
+class LocalApi(private val deviceToken: String, port: Int = 8765) {
+    private val host = "http://127.0.0.1:$port"
     private fun encode(s: String) = URLEncoder.encode(s, "UTF-8")
 
     private suspend fun request(method: String, path: String, body: JSONObject? = null): JSONObject =
@@ -36,13 +36,20 @@ class LocalApi(private val deviceToken: String) {
             } finally { conn.disconnect() }
         }
 
-    suspend fun health(): Boolean = withContext(Dispatchers.IO) {
+    suspend fun healthInfo(): JSONObject? = withContext(Dispatchers.IO) {
         try {
             val conn = URL(host + "/health").openConnection() as HttpURLConnection
             conn.connectTimeout = 2000; conn.readTimeout = 2000
-            try { conn.responseCode == 200 } finally { conn.disconnect() }
-        } catch (_: Exception) { false }
+            try {
+                if (conn.responseCode == 200) {
+                    val raw = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                    JSONObject(raw)
+                } else null
+            } finally { conn.disconnect() }
+        } catch (_: Exception) { null }
     }
+
+    suspend fun health(): Boolean = healthInfo()?.optBoolean("ok", false) == true
     suspend fun projects(): JSONArray = request("GET", "/v1/projects").getJSONArray("projects")
     suspend fun createProject(name: String, url: String) = request("POST", "/v1/projects",
         JSONObject().put("name", name).put("git_url", url))

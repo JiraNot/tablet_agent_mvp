@@ -96,7 +96,8 @@ class AgentForegroundService : Service() {
                         try {
                             val token = SecureDeviceToken.get(applicationContext)
                             if (token.isNotBlank()) {
-                                LocalApi(token).cancelTask(taskId)
+                                val port = com.tabletagent.local.runtime.EmbeddedBridgeManager.port.value
+                                LocalApi(token, port).cancelTask(taskId)
                             }
                         } catch (_: Exception) {}
                         stopServiceInternal()

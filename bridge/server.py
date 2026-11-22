@@ -46,7 +46,8 @@ class Handler(BaseHTTPRequestHandler):
         seg=[unquote(x) for x in path.path.split('/') if x]
         q=parse_qs(path.query)
         if self.command=='GET' and path.path=='/health':
-            return self.reply(200,{'ok':True,'service':'tablet-agent-local','version':'0.1.0'})
+            runtime='embedded' if os.getenv('TABLET_AGENT_EMBEDDED')=='1' else 'termux'
+            return self.reply(200,{'ok':True,'service':'tablet-agent-local','version':'0.1.0','runtime':runtime})
         bearer=self.headers.get('Authorization','')
         import secrets
         if not secrets.compare_digest(bearer,'Bearer '+self.core.token):
@@ -135,7 +136,8 @@ if __name__=='__main__':
     port=int(os.getenv('TABLET_AGENT_PORT','8765'))
     server,core=create_server(home,port)
     print('Local Tablet Agent API: http://127.0.0.1:%d'%port,flush=True)
-    print('Device token (paste once in native app Settings):',core.token,flush=True)
+    if os.getenv('TABLET_AGENT_EMBEDDED')!='1':
+        print('Device token (paste once in native app Settings):',core.token,flush=True)
     print('Workspace:',core.workspaces,flush=True)
     try:server.serve_forever(poll_interval=.25)
     except KeyboardInterrupt:pass

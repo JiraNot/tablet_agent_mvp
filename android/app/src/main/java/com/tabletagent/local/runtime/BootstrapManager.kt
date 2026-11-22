@@ -118,17 +118,7 @@ object BootstrapManager {
                 }
 
             // Ensure essential directories
-            File(rootfs, "tmp").apply { mkdirs(); setReadable(true, false); setWritable(true, false); setExecutable(true, false) }
-            File(rootfs, "dev").mkdirs()
-            File(rootfs, "proc").mkdirs()
-            File(rootfs, "sys").mkdirs()
-            File(rootfs, "root").apply { mkdirs(); setReadable(true, false); setWritable(true, false); setExecutable(true, false) }
-            File(rootfs, "root/.local/bin").mkdirs()
-
-            // Setup DNS
-            val resolvConf = File(rootfs, "etc/resolv.conf")
-            resolvConf.parentFile?.mkdirs()
-            resolvConf.writeText("nameserver 8.8.8.8\nnameserver 1.1.1.1\n")
+            ensureRuntimeDirs(context)
 
             _status.value = BootstrapStatus.Ready
             true
@@ -136,6 +126,32 @@ object BootstrapManager {
             android.util.Log.e("BootstrapManager", "Bootstrap extraction error", e)
             _status.value = BootstrapStatus.Error(e.message ?: "Extraction failed")
             false
+        }
+    }
+
+    /** Ensure workspace, git identity, temp, and DNS files exist inside rootfs. */
+    fun ensureRuntimeDirs(context: Context) {
+        val rootfs = getRootfsDir(context)
+        if (!rootfs.exists()) return
+
+        File(rootfs, "tmp").apply { mkdirs(); setReadable(true, false); setWritable(true, false); setExecutable(true, false) }
+        File(rootfs, "dev").mkdirs()
+        File(rootfs, "proc").mkdirs()
+        File(rootfs, "sys").mkdirs()
+        File(rootfs, "root").apply { mkdirs(); setReadable(true, false); setWritable(true, false); setExecutable(true, false) }
+        File(rootfs, "root/.local/bin").mkdirs()
+        File(rootfs, "root/tablet-agent/workspaces").mkdirs()
+        File(rootfs, "opt/tablet-agent").mkdirs()
+
+        val resolvConf = File(rootfs, "etc/resolv.conf")
+        if (!resolvConf.exists() || resolvConf.length() == 0L) {
+            resolvConf.parentFile?.mkdirs()
+            resolvConf.writeText("nameserver 8.8.8.8\nnameserver 1.1.1.1\n")
+        }
+
+        val gitConfig = File(rootfs, "root/.gitconfig")
+        if (!gitConfig.exists()) {
+            gitConfig.writeText("[user]\n\tname = Tablet Agent\n\temail = agent@local.tablet\n[init]\n\tdefaultBranch = main\n")
         }
     }
 }

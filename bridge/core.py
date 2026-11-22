@@ -149,9 +149,9 @@ class AntigravityAdapter(BaseAgentAdapter):
 
     def build_cmd(self, project_path: Path, prompt: str, mode: str, thread_id: str | None = None, model: str = '') -> list[str]:
         bin_cmd = self._resolve_binary(project_path)
-        cmd = bin_cmd + ['run', '--mode', mode]
+        cmd = bin_cmd + ['--print', '--output-format', 'stream-json', '--mode', 'plan' if mode == 'plan' else 'accept-edits']
         if thread_id and self.supports_resume:
-            cmd += ['--session', thread_id]
+            cmd += ['--conversation', thread_id]
         if model and model != 'default':
             cmd += ['--model', model]
         cmd.append(prompt)
@@ -467,13 +467,42 @@ class LocalCore:
                         elif kind in {'turn.failed','error'}:
                             fail_marker=True
                             self.append(task_id,'error',json.dumps(data,ensure_ascii=False)[:1800])
+                        elif kind=='system':
+                            sid=data.get('session_id','')
+                            if isinstance(sid,str) and len(sid)>6:
+                                self.thread_candidates[task_id]=sid
+                                self.append(task_id,'thread',sid)
+                        elif kind=='assistant':
+                            content=(data.get('message') or {}).get('content') or []
+                            if isinstance(content,list):
+                                for block in content:
+                                    if not isinstance(block,dict): continue
+                                    btype=block.get('type','')
+                                    if btype=='text':
+                                        txt=block.get('text','')
+                                        if txt:
+                                            lines.append(txt[:1500]); self.append(task_id,'message',txt)
+                                    elif btype=='tool_use':
+                                        self.append(task_id,'tool',f"tool_use: {block.get('name','')}")
+                        elif kind=='result':
+                            sid=data.get('session_id','')
+                            if isinstance(sid,str) and len(sid)>6:
+                                self.thread_candidates[task_id]=sid
+                            if data.get('is_error'):
+                                fail_marker=True
+                                self.append(task_id,'error',str(data.get('result', data))[:1800])
+                            else:
+                                done_marker=True
+                                res_txt=data.get('result','')
+                                if isinstance(res_txt,str) and res_txt and res_txt[:1500] not in lines:
+                                    lines.append(res_txt[:1500]); self.append(task_id,'message',res_txt)
                     except json.JSONDecodeError:
                         self.append(task_id,'log',line[:800])
                 else:
                     lines.append(line[:800]); self.append(task_id,'verification',line[:1200])
             proc.wait(timeout=2)
             if phase == 'agent' and proc.returncode == 0 and (not done_marker or fail_marker):
-                self.append(task_id, 'error', 'Codex did not complete successfully')
+                self.append(task_id, 'error', 'Agent CLI did not report turn completion')
                 return 90, '\n'.join(lines)[-6000:]
             return proc.returncode or 0, '\n'.join(lines)[-6000:]
         finally:
@@ -604,7 +633,7 @@ class LocalCore:
         agent_name = rec['agent']
         adapter = self.adapters.get(agent_name)
         if not adapter or not adapter.is_available():
-            self.set_status(task_id,'BLOCKED_SETUP', error=f'{adapter.display_name if adapter else agent_name} CLI not found in Termux PATH'); return
+            self.set_status(task_id,'BLOCKED_SETUP', error=f'{adapter.display_name if adapter else agent_name} CLI not found in runtime PATH'); return
         mode=rec['mode']
         self.set_status(task_id, 'PLANNING' if mode=='plan' else 'EXECUTING')
         policy = ('Plan only. Do not edit files or run mutating commands. Provide concise steps and test strategy.'

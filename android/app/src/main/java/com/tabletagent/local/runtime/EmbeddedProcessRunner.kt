@@ -28,7 +28,8 @@ object EmbeddedProcessRunner {
         context: Context,
         command: String,
         workingDir: String = "/root",
-        customBinds: List<Pair<String, String>> = emptyList()
+        customBinds: List<Pair<String, String>> = emptyList(),
+        extraEnv: Map<String, String> = emptyMap()
     ): Pair<List<String>, Map<String, String>> {
         BootstrapManager.setupHelperLibs(context)
         val nativeDir = context.applicationInfo.nativeLibraryDir
@@ -38,7 +39,7 @@ object EmbeddedProcessRunner {
         val rootfs = BootstrapManager.getRootfsDir(context).absolutePath
         val tmpDir = File(context.cacheDir, "proot_tmp").apply { mkdirs() }.absolutePath
 
-        val env = mapOf(
+        val env = mutableMapOf(
             "LD_LIBRARY_PATH" to "${libDir.absolutePath}:$nativeDir",
             "PROOT_LOADER" to loader,
             "PROOT_TMP_DIR" to tmpDir,
@@ -47,6 +48,7 @@ object EmbeddedProcessRunner {
             "TMPDIR" to "/tmp",
             "LANG" to "C.UTF-8"
         )
+        env.putAll(extraEnv)
 
         val args = mutableListOf(
             proot,
@@ -69,6 +71,23 @@ object EmbeddedProcessRunner {
         args.add(command)
 
         return Pair(args, env)
+    }
+
+    fun startDaemon(
+        context: Context,
+        command: String,
+        workingDir: String = "/root",
+        customBinds: List<Pair<String, String>> = emptyList(),
+        extraEnv: Map<String, String> = emptyMap()
+    ): Process {
+        val (cmd, env) = buildProotCommand(context, command, workingDir, customBinds, extraEnv)
+        val processBuilder = ProcessBuilder(cmd)
+        val pEnv = processBuilder.environment()
+        for ((k, v) in env) {
+            pEnv[k] = v
+        }
+        processBuilder.redirectErrorStream(true)
+        return processBuilder.start()
     }
 
     suspend fun execute(
