@@ -33,6 +33,83 @@ class BridgeError(Exception):
         self.status = status
         super().__init__(message)
 
+class BaseAgentAdapter:
+    def __init__(self, name: str, display_name: str, binary: str, can_plan: bool, can_build: bool, supports_resume: bool, models: list[str]):
+        self.name = name
+        self.display_name = display_name
+        self.binary = binary
+        self.can_plan = can_plan
+        self.can_build = can_build
+        self.supports_resume = supports_resume
+        self.models = models
+
+    def is_available(self) -> bool:
+        return bool(shutil.which(self.binary))
+
+    def build_cmd(self, project_path: Path, prompt: str, mode: str, thread_id: str | None = None, model: str = '') -> list[str]:
+        raise NotImplementedError
+
+class CodexAdapter(BaseAgentAdapter):
+    def __init__(self):
+        super().__init__(
+            name='codex',
+            display_name='Codex CLI',
+            binary='codex',
+            can_plan=True,
+            can_build=True,
+            supports_resume=True,
+            models=['default', 'o3-mini', 'o1', 'gpt-4o']
+        )
+
+    def build_cmd(self, project_path: Path, prompt: str, mode: str, thread_id: str | None = None, model: str = '') -> list[str]:
+        cmd = [self.binary, 'exec', '--json', '--sandbox', 'read-only' if mode == 'plan' else 'workspace-write', '--skip-git-repo-check']
+        if thread_id and self.supports_resume:
+            cmd += ['resume', thread_id]
+        if model and model != 'default':
+            cmd += ['--model', model]
+        cmd.append(prompt)
+        return cmd
+
+class ClaudeCodeAdapter(BaseAgentAdapter):
+    def __init__(self):
+        super().__init__(
+            name='claude',
+            display_name='Claude Code',
+            binary='claude',
+            can_plan=True,
+            can_build=True,
+            supports_resume=True,
+            models=['default', 'claude-3-7-sonnet', 'claude-3-5-sonnet', 'claude-3-5-haiku']
+        )
+
+    def build_cmd(self, project_path: Path, prompt: str, mode: str, thread_id: str | None = None, model: str = '') -> list[str]:
+        cmd = [self.binary, '--print', '--output-format', 'stream-json']
+        if thread_id and self.supports_resume:
+            cmd += ['--resume', thread_id]
+        if model and model != 'default':
+            cmd += ['--model', model]
+        cmd.append(prompt)
+        return cmd
+
+class OpenCodeAdapter(BaseAgentAdapter):
+    def __init__(self):
+        super().__init__(
+            name='opencode',
+            display_name='OpenCode',
+            binary='opencode',
+            can_plan=True,
+            can_build=True,
+            supports_resume=False,
+            models=['default']
+        )
+
+    def build_cmd(self, project_path: Path, prompt: str, mode: str, thread_id: str | None = None, model: str = '') -> list[str]:
+        cmd = [self.binary, 'run', '--mode', mode]
+        if model and model != 'default':
+            cmd += ['--model', model]
+        cmd.append(prompt)
+        return cmd
+
 class LocalCore:
     def __init__(self, home: Path):
         self.home = Path(home).expanduser().resolve()
@@ -47,6 +124,11 @@ class LocalCore:
         self.thread_candidates: dict[str, str] = {}
         self.previews: dict[str, dict[str, Any]] = {}
         self.approval_events: dict[str, threading.Event] = {}
+        self.adapters: dict[str, BaseAgentAdapter] = {
+            'codex': CodexAdapter(),
+            'claude': ClaudeCodeAdapter(),
+            'opencode': OpenCodeAdapter()
+        }
         self._init_db()
         self._recover_interrupted()
 
@@ -249,12 +331,29 @@ class LocalCore:
         with self._db() as db:
             return [dict(r) for r in db.execute('SELECT * FROM events WHERE task_id=? AND seq>? ORDER BY seq LIMIT 120',(task_id,max(0,after_seq)))]
 
-    def start_task(self, project: str, prompt: str, mode: str = 'build', agent: str = 'codex') -> dict[str, Any]:
+    def available_agents(self) -> list[dict[str, Any]]:
+        return [{
+            'name': a.name,
+            'display_name': a.display_name,
+            'binary': a.binary,
+            'available': a.is_available(),
+            'can_plan': a.can_plan,
+            'can_build': a.can_build,
+            'supports_resume': a.supports_resume,
+            'models': a.models
+        } for a in self.adapters.values()]
+
+    def start_task(self, project: str, prompt: str, mode: str = 'build', agent: str = 'codex', model: str = '') -> dict[str, Any]:
         self._project(project)
         if mode not in ALLOWED_MODES:
             raise BridgeError('Mode must be plan or build')
-        if agent != 'codex':
-            raise BridgeError('This runnable MVP supports Codex only; other adapters are planned')
+        if agent not in self.adapters:
+            raise BridgeError(f'Unknown agent "{agent}". Available: {", ".join(self.adapters.keys())}')
+        adapter = self.adapters[agent]
+        if mode == 'plan' and not adapter.can_plan:
+            raise BridgeError(f'Agent "{agent}" does not support plan mode')
+        if mode == 'build' and not adapter.can_build:
+            raise BridgeError(f'Agent "{agent}" does not support build mode')
         if not prompt.strip() or len(prompt) > 24000:
             raise BridgeError('Prompt length must be 1-24000 characters')
         task_id = str(uuid.uuid4()); now=time.time()
@@ -266,7 +365,7 @@ class LocalCore:
                     raise BridgeError('Another task is active in this project; finish or cancel it first', 409)
                 db.execute('INSERT INTO tasks(id,project,prompt,agent,mode,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)', (task_id,project,prompt,agent,mode,'QUEUED',now,now))
         self.append(task_id,'status','QUEUED')
-        threading.Thread(target=self._worker, args=(task_id,), daemon=True, name=f'task-{task_id[:8]}').start()
+        threading.Thread(target=self._worker, args=(task_id, model), daemon=True, name=f'task-{task_id[:8]}').start()
         return self.task(task_id)
 
     def _run(self, task_id: str, cmd: list[str], cwd: Path, timeout: float, phase: str) -> tuple[int,str]:
@@ -440,41 +539,37 @@ class LocalCore:
                 evt.set()
         return dict(updated)
 
-    def _thread_for_project(self, project: str) -> str | None:
+    def _thread_for_project(self, project: str, agent: str = 'codex') -> str | None:
         with self._db() as db:
-            row=db.execute('SELECT session_id FROM agent_threads WHERE project=? AND agent=?',(project,'codex')).fetchone()
+            row=db.execute('SELECT session_id FROM agent_threads WHERE project=? AND agent=?',(project,agent)).fetchone()
         return row['session_id'] if row else None
 
-    def _remember_thread(self, project: str, task_id: str):
+    def _remember_thread(self, project: str, task_id: str, agent: str = 'codex'):
         thread_id=self.thread_candidates.pop(task_id,None)
         if not thread_id:return
         with self._db() as db:
-            db.execute('INSERT INTO agent_threads(project,agent,session_id,updated_at) VALUES(?,?,?,?) ON CONFLICT(project) DO UPDATE SET session_id=excluded.session_id, updated_at=excluded.updated_at', (project,'codex',thread_id,time.time()))
+            db.execute('INSERT INTO agent_threads(project,agent,session_id,updated_at) VALUES(?,?,?,?) ON CONFLICT(project) DO UPDATE SET session_id=excluded.session_id, updated_at=excluded.updated_at', (project,agent,thread_id,time.time()))
 
-    def _agent_cmd(self, project: str, prompt: str, mode: str) -> list[str]:
-        command=['codex','exec','--json','--sandbox','read-only' if mode=='plan' else 'workspace-write','--skip-git-repo-check']
-        thread=self._thread_for_project(project)
-        if thread:command += ['resume',thread]
-        command.append(prompt)
-        return command
-
-    def _worker(self, task_id: str):
+    def _worker(self, task_id: str, model: str = ''):
         rec=self.task(task_id); project_path=self._project(rec['project'])
         if self.task(task_id)['status']=='CANCELLED': return
-        if not shutil.which('codex'):
-            self.set_status(task_id,'BLOCKED_SETUP', error='Codex CLI not found in Termux PATH'); return
+        agent_name = rec['agent']
+        adapter = self.adapters.get(agent_name)
+        if not adapter or not adapter.is_available():
+            self.set_status(task_id,'BLOCKED_SETUP', error=f'{adapter.display_name if adapter else agent_name} CLI not found in Termux PATH'); return
         mode=rec['mode']
         self.set_status(task_id, 'PLANNING' if mode=='plan' else 'EXECUTING')
         policy = ('Plan only. Do not edit files or run mutating commands. Provide concise steps and test strategy.'
                   if mode=='plan' else
                   'You may edit files under the current workspace. Keep changes scoped; run relevant tests. Never read or disclose .env files, keys, or credentials. Do not git push or deploy. Explain what changed and tests actually executed.')
-        cmd=self._agent_cmd(rec['project'], f'{policy}\n\nUser task:\n{rec["prompt"]}',mode)
+        thread = self._thread_for_project(rec['project'], agent_name)
+        cmd = adapter.build_cmd(project_path, f'{policy}\n\nUser task:\n{rec["prompt"]}', mode, thread, model)
         try:
             rc, output=self._run(task_id,cmd,project_path,timeout=1800,phase='agent')
             if self.task(task_id)['status']=='CANCELLED': return
             if rc!=0:
-                self.set_status(task_id,'FAILED',error=f'Codex exited with status {rc}',result=output);return
-            self._remember_thread(rec['project'],task_id)
+                self.set_status(task_id,'FAILED',error=f'{adapter.display_name} exited with status {rc}',result=output);return
+            self._remember_thread(rec['project'],task_id, agent_name)
             if mode=='plan':
                 self.set_status(task_id,'PLANNED',result=output);return
             self.set_status(task_id,'VERIFYING',result=output)
@@ -503,12 +598,13 @@ class LocalCore:
                             f'Command: {" ".join(command)}\nExit code: {rc}\nError log:\n{REDACTION.sub("[REDACTED]",verify_output)[-2400:]}\n'
                             'Fix these errors within the workspace, rerun your own checks, and report changes. '
                             'Do not access credentials or deploy.')
-                fix_cmd=self._agent_cmd(rec['project'],fix_prompt,'build')
+                fix_thread = self._thread_for_project(rec['project'], agent_name)
+                fix_cmd = adapter.build_cmd(project_path, fix_prompt, 'build', fix_thread, model)
                 rc,repair_output=self._run(task_id,fix_cmd,project_path,timeout=1200,phase='agent')
                 if self.task(task_id)['status']=='CANCELLED':return
                 if rc:
                     self.set_status(task_id,'FAILED',error='Agent repair attempt failed',verification=verify_output,result=repair_output);return
-                self._remember_thread(rec['project'],task_id)
+                self._remember_thread(rec['project'],task_id, agent_name)
                 self.set_status(task_id,'VERIFYING')
         except Exception as exc:
             try:
@@ -552,3 +648,73 @@ class LocalCore:
         with self.lock: p=self.previews.pop(project,None)
         if p:self._kill(p['process'])
         return {'status':'stopped'}
+
+    def git_status(self, project: str) -> dict[str, Any]:
+        base = self._project(project)
+        git_cmd = shutil.which('git') or 'git'
+        try:
+            res_branch = subprocess.run([git_cmd, 'rev-parse', '--abbrev-ref', 'HEAD'],
+                                        cwd=base, capture_output=True, text=True, timeout=10)
+            branch = res_branch.stdout.strip() if res_branch.returncode == 0 else 'HEAD'
+            res = subprocess.run([git_cmd, 'status', '--porcelain'],
+                                 cwd=base, capture_output=True, text=True, timeout=10)
+            if res.returncode != 0:
+                return {'is_git': False, 'branch': '', 'files': [], 'clean': True, 'error': res.stderr.strip()}
+            lines = [l.rstrip() for l in res.stdout.splitlines() if l.strip()]
+            files = []
+            for l in lines:
+                status_code = l[:2]
+                filename = l[3:].strip()
+                files.append({'status': status_code, 'file': filename})
+            return {
+                'is_git': True,
+                'branch': branch,
+                'files': files,
+                'clean': len(files) == 0,
+                'uncommitted_count': len(files)
+            }
+        except Exception as e:
+            return {'is_git': False, 'branch': '', 'files': [], 'clean': True, 'error': str(e)}
+
+    def git_diff(self, project: str) -> dict[str, Any]:
+        base = self._project(project)
+        git_cmd = shutil.which('git') or 'git'
+        try:
+            res_unstaged = subprocess.run([git_cmd, 'diff'],
+                                          cwd=base, capture_output=True, text=True, timeout=15)
+            res_staged = subprocess.run([git_cmd, 'diff', '--cached'],
+                                        cwd=base, capture_output=True, text=True, timeout=15)
+            combined = (res_staged.stdout + '\n' + res_unstaged.stdout).strip()
+            clean_diff = REDACTION.sub('[REDACTED]', combined)[:64000]
+            return {
+                'diff': clean_diff,
+                'has_changes': bool(combined),
+                'bytes': len(clean_diff.encode('utf-8'))
+            }
+        except Exception as e:
+            return {'diff': '', 'has_changes': False, 'error': str(e)}
+
+    def git_commit(self, project: str, message: str) -> dict[str, Any]:
+        base = self._project(project)
+        msg = message.strip()
+        if not msg:
+            raise BridgeError('Commit message cannot be empty')
+        if len(msg) > 1000:
+            raise BridgeError('Commit message must be under 1000 characters')
+        git_cmd = shutil.which('git') or 'git'
+        try:
+            res_add = subprocess.run([git_cmd, 'add', '-A'], cwd=base, capture_output=True, text=True, timeout=15)
+            if res_add.returncode != 0:
+                raise BridgeError(f'Git add failed: {res_add.stderr.strip()}')
+            res_commit = subprocess.run([git_cmd, 'commit', '-m', msg], cwd=base, capture_output=True, text=True, timeout=15)
+            if res_commit.returncode != 0:
+                if 'nothing to commit' in res_commit.stdout or 'nothing to commit' in res_commit.stderr:
+                    return {'success': True, 'committed': False, 'message': 'Nothing to commit, working tree clean'}
+                raise BridgeError(f'Git commit failed: {res_commit.stderr.strip() or res_commit.stdout.strip()}')
+            res_rev = subprocess.run([git_cmd, 'rev-parse', 'HEAD'], cwd=base, capture_output=True, text=True, timeout=10)
+            sha = res_rev.stdout.strip() if res_rev.returncode == 0 else ''
+            return {'success': True, 'committed': True, 'sha': sha, 'message': msg}
+        except BridgeError:
+            raise
+        except Exception as e:
+            raise BridgeError(f'Git commit error: {e}')

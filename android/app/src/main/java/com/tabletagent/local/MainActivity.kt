@@ -71,9 +71,13 @@ fun TabletAgentApp() {
     var fileBody by remember { mutableStateOf("") }
     var error by remember { mutableStateOf("") }
     var createDialog by remember { mutableStateOf(false) }
+    var gitReviewDialog by remember { mutableStateOf(false) }
     var pickerExpanded by remember { mutableStateOf(false) }
     var prompt by rememberSaveable { mutableStateOf("") }
     var mode by rememberSaveable { mutableStateOf("plan") }
+    var availableAgents by remember { mutableStateOf<List<JSONObject>>(emptyList()) }
+    var selectedAgent by rememberSaveable { mutableStateOf("codex") }
+    var selectedModel by rememberSaveable { mutableStateOf("default") }
     var tokenEntry by remember { mutableStateOf(token) }
     val notify: (Throwable) -> Unit = { error = it.message ?: it.javaClass.simpleName }
 
@@ -88,6 +92,7 @@ fun TabletAgentApp() {
             online = api.health()
             if (online && token.isNotBlank()) {
                 try {
+                    runCatching { availableAgents = api.agents().objects() }
                     projects = api.projects().objects()
                     if (selectedProject.isBlank() && projects.isNotEmpty()) {
                         selectedProject = projects.first().getString("name")
@@ -180,6 +185,14 @@ fun TabletAgentApp() {
                         }
                     }
                     Spacer(Modifier.weight(1f))
+                    if (selectedProject.isNotBlank()) {
+                        OutlinedButton(onClick = { gitReviewDialog = true }) {
+                            Icon(Icons.Default.History, null, Modifier.size(18.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Git")
+                        }
+                        Spacer(Modifier.width(6.dp))
+                    }
                     IconButton(onClick = { createDialog = true }) { Icon(Icons.Default.CreateNewFolder, "New project") }
                 }
                 Spacer(Modifier.height(6.dp))
@@ -191,12 +204,14 @@ fun TabletAgentApp() {
                         Box(Modifier.weight(.51f).fillMaxHeight()) {
                             AgentScreen(
                     prompt = prompt, onPrompt = { prompt = it }, mode = mode, onMode = { mode = it },
+                    agents = availableAgents, selectedAgent = selectedAgent, onSelectAgent = { selectedAgent = it },
+                    selectedModel = selectedModel, onSelectModel = { selectedModel = it },
                     tasks = tasks, selectedTask = selectedTask, onSelectTask = { selectedTask = it }, events = events,
                     approvals = approvals,
                     canRun = online && token.isNotBlank() && selectedProject.isNotBlank(),
                     onSend = { scope.launch {
                         try {
-                            val t = api.startTask(selectedProject, prompt, mode)
+                            val t = api.startTask(selectedProject, prompt, mode, selectedAgent, if (selectedModel == "default") "" else selectedModel)
                             val taskId = t.getString("id")
                             selectedTask = taskId
                             AgentForegroundService.start(context, taskId, selectedProject, mode.uppercase(), prompt)
@@ -225,12 +240,14 @@ fun TabletAgentApp() {
                             enabled = online && selectedProject.isNotBlank()) }
                     } else AgentScreen(
                         prompt = prompt, onPrompt = { prompt = it }, mode = mode, onMode = { mode = it },
+                        agents = availableAgents, selectedAgent = selectedAgent, onSelectAgent = { selectedAgent = it },
+                        selectedModel = selectedModel, onSelectModel = { selectedModel = it },
                         tasks = tasks, selectedTask = selectedTask, onSelectTask = { selectedTask = it }, events = events,
                         approvals = approvals,
                         canRun = online && token.isNotBlank() && selectedProject.isNotBlank(),
                         onSend = { scope.launch {
                             try {
-                                val t = api.startTask(selectedProject, prompt, mode)
+                                val t = api.startTask(selectedProject, prompt, mode, selectedAgent, if (selectedModel == "default") "" else selectedModel)
                                 val taskId = t.getString("id")
                                 selectedTask = taskId
                                 AgentForegroundService.start(context, taskId, selectedProject, mode.uppercase(), prompt)
@@ -293,10 +310,21 @@ fun TabletAgentApp() {
             dismissButton = { TextButton(onClick = { createDialog = false }) { Text("Cancel") } }
         )
     }
+    if (gitReviewDialog && selectedProject.isNotBlank()) {
+        GitReviewDialog(
+            project = selectedProject,
+            api = api,
+            onDismiss = { gitReviewDialog = false },
+            onCommitted = { error = "Changes committed locally" },
+            notify = notify
+        )
+    }
 }
 
 @Composable
 private fun AgentScreen(prompt: String, onPrompt: (String) -> Unit, mode: String, onMode: (String) -> Unit,
+                        agents: List<JSONObject> = emptyList(), selectedAgent: String = "codex", onSelectAgent: (String) -> Unit = {},
+                        selectedModel: String = "default", onSelectModel: (String) -> Unit = {},
                         tasks: List<JSONObject>, selectedTask: String, onSelectTask: (String) -> Unit,
                         events: List<JSONObject>, approvals: List<JSONObject> = emptyList(),
                         canRun: Boolean, onSend: () -> Unit, onCancel: () -> Unit,
@@ -365,6 +393,55 @@ private fun AgentScreen(prompt: String, onPrompt: (String) -> Unit, mode: String
                 )
             }
         }
+        Spacer(Modifier.height(4.dp))
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Agent:", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+            val fallback = listOf(
+                Triple("codex", "Codex", true),
+                Triple("claude", "Claude", true),
+                Triple("opencode", "OpenCode", true)
+            )
+            val list = if (agents.isNotEmpty()) agents.map {
+                Triple(it.optString("name"), it.optString("display_name"), it.optBoolean("available", true))
+            } else fallback
+
+            list.forEach { (name, label, avail) ->
+                FilterChip(
+                    selected = selectedAgent == name,
+                    onClick = {
+                        onSelectAgent(name)
+                        onSelectModel("default")
+                    },
+                    label = { Text(if (avail) label else "$label (offline)") },
+                    leadingIcon = if (selectedAgent == name) {
+                        { Icon(Icons.Default.Check, null, Modifier.size(14.dp)) }
+                    } else null
+                )
+            }
+        }
+        val currAgentObj = agents.firstOrNull { it.optString("name") == selectedAgent }
+        val models = currAgentObj?.optJSONArray("models")?.let { arr -> (0 until arr.length()).map { arr.getString(it) } } ?: emptyList()
+        if (models.size > 1) {
+            Spacer(Modifier.height(4.dp))
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Model:", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                models.forEach { m ->
+                    FilterChip(
+                        selected = selectedModel == m,
+                        onClick = { onSelectModel(m) },
+                        label = { Text(m) }
+                    )
+                }
+            }
+        }
         Spacer(Modifier.height(6.dp))
         OutlinedTextField(prompt, onPrompt, modifier = Modifier.fillMaxWidth().heightIn(min = 115.dp),
             placeholder = { Text("Describe a feature, bug, or improvement…") }, maxLines = 5)
@@ -375,7 +452,8 @@ private fun AgentScreen(prompt: String, onPrompt: (String) -> Unit, mode: String
             Spacer(Modifier.weight(1f))
             Button(onClick = onSend, enabled = canRun && prompt.isNotBlank()) {
                 Icon(Icons.AutoMirrored.Filled.Send, null, Modifier.size(17.dp))
-                Spacer(Modifier.width(5.dp)); Text("Run Codex")
+                Spacer(Modifier.width(5.dp))
+                Text("Run ${selectedAgent.replaceFirstChar { it.uppercase() }}")
             }
         }
         HorizontalDivider()
@@ -589,7 +667,145 @@ private fun SettingsScreen(tokenEntry: String, onToken: (String) -> Unit, onSave
         Text("1. Install Termux locally.\n2. Install python, git, nodejs and Codex CLI.\n3. Copy bridge files into ~/tablet-agent/bridge.\n4. Run python ~/tablet-agent/bridge/server.py.\n5. Copy the generated token above.")
         Text("To use Start bridge: enable allow-external-apps=true in Termux and grant this app RUN_COMMAND permission.", style = MaterialTheme.typography.bodySmall)
         HorizontalDivider()
-        Text("MVP limitations", style = MaterialTheme.typography.titleMedium)
-        Text("Codex is the only connected agent. Claude/OpenCode adapters, native bundled Linux, streaming WebSocket, full approval UI and background reliability are later phases.", style = MaterialTheme.typography.bodySmall)
+        Text("MVP capabilities & limitations", style = MaterialTheme.typography.titleMedium)
+        Text("Codex, Claude Code, and OpenCode adapters are supported with capability flags. Git inspection and manual commit safety are active. Embedded native Linux runtime, streaming WebSocket, and integrated sandbox are later milestones.", style = MaterialTheme.typography.bodySmall)
     }
+}
+
+@Composable
+fun GitReviewDialog(
+    project: String,
+    api: LocalApi,
+    onDismiss: () -> Unit,
+    onCommitted: () -> Unit,
+    notify: (Throwable) -> Unit
+) {
+    val scope = rememberCoroutineScope()
+    var loading by remember { mutableStateOf(true) }
+    var statusObj by remember { mutableStateOf<JSONObject?>(null) }
+    var diffText by remember { mutableStateOf("") }
+    var commitMessage by remember { mutableStateOf("") }
+    var committing by remember { mutableStateOf(false) }
+
+    fun refresh() {
+        loading = true
+        scope.launch {
+            try {
+                val st = api.gitStatus(project)
+                val df = api.gitDiff(project)
+                statusObj = st
+                diffText = df.optString("diff", "")
+            } catch (e: Exception) {
+                notify(e)
+            } finally {
+                loading = false
+            }
+        }
+    }
+
+    LaunchedEffect(project) {
+        refresh()
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.History, null, Modifier.size(22.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Git Review & Commit", style = MaterialTheme.typography.titleMedium)
+            }
+        },
+        text = {
+            if (loading) {
+                Box(Modifier.fillMaxWidth().height(160.dp), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator()
+                }
+            } else {
+                val clean = statusObj?.optBoolean("clean", true) ?: true
+                val branch = statusObj?.optString("branch", "HEAD") ?: "HEAD"
+                val uncommittedCount = statusObj?.optInt("uncommitted_count", 0) ?: 0
+
+                Column(
+                    modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        shape = MaterialTheme.shapes.small,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text("Branch: $branch", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                            Spacer(Modifier.weight(1f))
+                            Text(
+                                if (clean) "Clean working tree" else "$uncommittedCount uncommitted changes",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (clean) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.tertiary
+                            )
+                        }
+                    }
+
+                    if (!clean) {
+                        Text("Unified Diff:", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                        Surface(
+                            color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                            shape = MaterialTheme.shapes.small,
+                            modifier = Modifier.fillMaxWidth().heightIn(max = 240.dp)
+                        ) {
+                            Text(
+                                text = diffText.ifBlank { "No text diff available (binary or untracked files)" },
+                                style = MaterialTheme.typography.bodySmall.copy(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace),
+                                modifier = Modifier.padding(8.dp).verticalScroll(rememberScrollState())
+                            )
+                        }
+
+                        OutlinedTextField(
+                            value = commitMessage,
+                            onValueChange = { commitMessage = it },
+                            label = { Text("Commit message") },
+                            placeholder = { Text("feat: describe verified changes") },
+                            modifier = Modifier.fillMaxWidth(),
+                            maxLines = 3
+                        )
+
+                        Text(
+                            "Safety policy: Autonomous git pushes are prohibited. Commits are strictly local to this device.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.outline
+                        )
+                    } else {
+                        Text("Working directory is clean. No uncommitted changes.", style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            val isClean = statusObj?.optBoolean("clean", true) ?: true
+            if (!isClean) {
+                Button(
+                    onClick = {
+                        committing = true
+                        scope.launch {
+                            try {
+                                api.gitCommit(project, commitMessage.trim())
+                                refresh()
+                                onCommitted()
+                            } catch (e: Exception) {
+                                notify(e)
+                            } finally {
+                                committing = false
+                            }
+                        }
+                    },
+                    enabled = !committing && commitMessage.isNotBlank()
+                ) {
+                    Text(if (committing) "Committing…" else "Commit changes")
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Close") }
+        }
+    )
 }

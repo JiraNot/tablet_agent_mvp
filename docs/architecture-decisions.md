@@ -28,3 +28,11 @@ Reason: Android battery optimizations and OEM task killers aggressively kill bac
 ### ADR-007 — Interactive Tool Approvals and Safe Defaults
 Decision: Introduce an `approvals` table in SQLite, REST endpoints (`/v1/tasks/{id}/approvals`), and a native Compose banner.
 Reason: Autonomous agents can propose destructive actions (e.g. deleting files, shell commands, or git pushes). The bridge pauses execution, marks task as `WAITING_APPROVAL`, and enforces a 120-second timeout with a secure-by-default denial if the user does not explicitly approve.
+
+### ADR-008 — Normalized Capability-Aware Agent Adapters
+Decision: Encapsulate CLI differences into a normalized `AgentAdapter` interface. Support Codex, Claude Code, and OpenCode with explicit capability flags (`supports_resume`, `can_plan`, `can_build`, `allowed_models`). The bridge exposes `/v1/agents` indicating whether each CLI is installed on device.
+Reason: Different agents use different parameters and flags. Standardizing capabilities prevents brittle assumptions and allows the UI to dynamically show available agents without breaking single-agent simplicity.
+
+### ADR-009 — Explicit Git Review and Commit Safety
+Decision: Provide read-only `/v1/projects/{name}/git/status` and `/v1/projects/{name}/git/diff` endpoints, with mutating `/v1/projects/{name}/git/commit` restricted to explicit user-triggered actions. Never allow agents to push or commit autonomously.
+Reason: Users must retain complete authority over Git version control and repository history. Preventing unprompted agent commits or pushes protects against unwanted destructive repository overwrites.

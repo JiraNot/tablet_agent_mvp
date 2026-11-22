@@ -56,10 +56,12 @@ class Handler(BaseHTTPRequestHandler):
             if method=='GET':return self.reply(200,{'projects':self.core.projects()})
             if method=='POST':
                 obj=self._body();return self.reply(201,self.core.create_project(str(obj.get('name','')),str(obj.get('git_url',''))))
+        if seg==['v1','agents'] and method=='GET':
+            return self.reply(200,{'agents':self.core.available_agents()})
         if seg==['v1','tasks']:
             if method=='GET':return self.reply(200,{'tasks':self.core.tasks(q.get('project',[None])[0])})
             if method=='POST':
-                obj=self._body();return self.reply(202,self.core.start_task(str(obj.get('project','')),str(obj.get('prompt','')),str(obj.get('mode','build')),str(obj.get('agent','codex'))))
+                obj=self._body();return self.reply(202,self.core.start_task(str(obj.get('project','')),str(obj.get('prompt','')),str(obj.get('mode','build')),str(obj.get('agent','codex')),str(obj.get('model',''))))
         if len(seg)>=3 and seg[:2]==['v1','tasks']:
             tid=seg[2]
             if len(seg)==3 and method=='GET':return self.reply(200,self.core.task(tid))
@@ -84,6 +86,14 @@ class Handler(BaseHTTPRequestHandler):
                 rel=q.get('path',[''])[0]
                 if method=='GET':return self.reply(200,self.core.read_file(name,rel))
                 if method=='PUT':return self.reply(200,self.core.write_file(name,rel,str(self._body().get('content',''))))
+            if len(seg)==5 and seg[3]=='git':
+                if seg[4]=='status' and method=='GET':
+                    return self.reply(200,self.core.git_status(name))
+                if seg[4]=='diff' and method=='GET':
+                    return self.reply(200,self.core.git_diff(name))
+                if seg[4]=='commit' and method=='POST':
+                    obj=self._body()
+                    return self.reply(200,self.core.git_commit(name,str(obj.get('message',''))))
             if len(seg)>=4 and seg[3]=='preview':
                 if len(seg)==4 and method=='GET':return self.reply(200,self.core.preview(name))
                 if len(seg)==5 and seg[4]=='start' and method=='POST':

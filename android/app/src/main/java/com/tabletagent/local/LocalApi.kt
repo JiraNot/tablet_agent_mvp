@@ -47,8 +47,9 @@ class LocalApi(private val deviceToken: String) {
     suspend fun createProject(name: String, url: String) = request("POST", "/v1/projects",
         JSONObject().put("name", name).put("git_url", url))
     suspend fun tasks(project: String): JSONArray = request("GET", "/v1/tasks?project=${encode(project)}").getJSONArray("tasks")
-    suspend fun startTask(project: String, prompt: String, mode: String): JSONObject = request("POST", "/v1/tasks",
-        JSONObject().put("project", project).put("prompt", prompt).put("mode", mode).put("agent", "codex"))
+    suspend fun agents(): JSONArray = request("GET", "/v1/agents").getJSONArray("agents")
+    suspend fun startTask(project: String, prompt: String, mode: String, agent: String = "codex", model: String = ""): JSONObject = request("POST", "/v1/tasks",
+        JSONObject().put("project", project).put("prompt", prompt).put("mode", mode).put("agent", agent).put("model", model))
     suspend fun events(taskId: String, after: Int): JSONArray = request("GET", "/v1/tasks/${encode(taskId)}/events?after=$after").getJSONArray("events")
     suspend fun approvals(taskId: String): JSONArray = request("GET", "/v1/tasks/${encode(taskId)}/approvals").getJSONArray("approvals")
     suspend fun respondApproval(taskId: String, approvalId: String, allow: Boolean): JSONObject = request("POST",
@@ -58,6 +59,9 @@ class LocalApi(private val deviceToken: String) {
     suspend fun files(project: String, dir: String = "."): JSONArray = request("GET", "/v1/projects/${encode(project)}/files?path=${encode(dir)}").getJSONArray("files")
     suspend fun file(project: String, path: String): JSONObject = request("GET", "/v1/projects/${encode(project)}/file?path=${encode(path)}")
     suspend fun saveFile(project: String, path: String, text: String): JSONObject = request("PUT", "/v1/projects/${encode(project)}/file?path=${encode(path)}", JSONObject().put("content", text))
+    suspend fun gitStatus(project: String): JSONObject = request("GET", "/v1/projects/${encode(project)}/git/status")
+    suspend fun gitDiff(project: String): JSONObject = request("GET", "/v1/projects/${encode(project)}/git/diff")
+    suspend fun gitCommit(project: String, message: String): JSONObject = request("POST", "/v1/projects/${encode(project)}/git/commit", JSONObject().put("message", message))
     suspend fun previewStatus(project: String): JSONObject = request("GET", "/v1/projects/${encode(project)}/preview")
     suspend fun previewStart(project: String): JSONObject = request("POST", "/v1/projects/${encode(project)}/preview/start", JSONObject())
     suspend fun previewStop(project: String): JSONObject = request("POST", "/v1/projects/${encode(project)}/preview/stop", JSONObject())

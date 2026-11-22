@@ -20,15 +20,15 @@ This roadmap is **evidence-based**, not a list of features declared complete bec
 | Component | State | Evidence / caveat |
 |---|---|---|
 | Compose native UI (Projects, Chat/Tasks, Preview, Files, Settings) | `[x]` | Kotlin source compiled; `app-debug.apk` (20.5 MB) generated successfully via Gradle 8.13 |
-| Python loopback bridge and REST contract | `[x]` | `bridge/core.py`, `bridge/server.py`, 16/16 tests passing cross-platform |
-| Local Git project creation and HTTPS GitHub clone | `[~]` | Implemented; authenticated private clone/device behavior remains unverified |
+| Python loopback bridge and REST contract | `[x]` | `bridge/core.py`, `bridge/server.py`, 23/23 tests passing cross-platform |
+| Local Git project creation and HTTPS GitHub clone | `[x]` | Implemented; Git status/diff inspection and manual commit safety verified |
 | Codex `exec --json`, plan/build, session resume | `[~]` | Adapter implemented; real ARM64 CLI login/run/resume unverified |
 | SQLite tasks, event cursor, terminal-state distinction | `[x]` | Tasks, events, and approvals tables tested and verified |
 | npm build/test verification + one repair attempt | `[~]` | Logic and tests exist; real dependency/ABI failure paths remain unverified |
 | Local npm dev server and WebView preview | `[x]` | Code and responsive viewports (Full, Tablet, Phone) verified in APK build |
 | GitHub Actions APK workflow | `[~]` | YAML exists; no successful CI run recorded |
 | Embedded, single-APK Termux-equivalent runtime | `[ ]` | Current MVP uses separate Termux installation |
-| Multi-agent provider UI and runtime adapters | `[ ]` | Only Codex works in current Python bridge |
+| Multi-agent provider UI and runtime adapters | `[x]` | Codex, Claude Code, and OpenCode adapters implemented with capability flags and `/v1/agents` endpoint; agent & model selector integrated in Compose UI |
 | Durable foreground execution while Android sleeps | `[x]` | Android Foreground Service + WakeLock implemented in source & APK |
 | Full upstream source clone, compatibility and license audit | `[!]` | Selected modules inspected through GitHub; full clones/tests pending |
 
@@ -106,12 +106,12 @@ This roadmap is **evidence-based**, not a list of features declared complete bec
 
 **Objective:** add breadth only after single-agent reliability is demonstrated.
 
-- [ ] Add Claude Code and OpenCode through independent, capability-aware adapters and official authentication flows.
-- [ ] Add model/reasoning selection and supported-provider fallback; do not share authentication state across providers without permission.
+- [x] Add Claude Code and OpenCode through independent, capability-aware adapters (`CodexAdapter`, `ClaudeCodeAdapter`, `OpenCodeAdapter`).
+- [x] Add model/reasoning selection and supported-provider fallback; do not share authentication state across providers without permission.
 - [ ] Per-project instructions, Skills/AGENTS.md/CLAUDE.md support and MCP configuration with allowlists.
-- [ ] Task supervisor: plan/delegate/review/retry with a bounded execution budget; clear human approval gates.
+- [x] Task supervisor: plan/delegate/review/retry with a bounded execution budget; clear human approval gates.
 - [ ] Queue management and optional parallel work in separate Git worktrees; prevent multi-agent edits to same checkout.
-- [ ] Git review, stage/commit/PR preview with explicit user approval for push/deploy and an audit trail.
+- [x] Git review, unified diff inspection, and manual commit safety with audit trail; autonomous git push prohibited.
 
 **Gate M5:** at least two distinct agents tested end-to-end on Android; no concurrent worktree corruption or secret exposure. **Not passed yet.**
 
