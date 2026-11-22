@@ -216,31 +216,34 @@ class AgentForegroundService : Service() {
         const val EXTRA_DETAILS = "details"
 
         fun start(context: Context, taskId: String, project: String, status: String, prompt: String) {
-            val intent = Intent(context, AgentForegroundService::class.java).apply {
-                action = ACTION_START
-                putExtra(EXTRA_TASK_ID, taskId)
-                putExtra(EXTRA_PROJECT, project)
-                putExtra(EXTRA_STATUS, status)
-                putExtra(EXTRA_PROMPT, prompt)
+            runCatching {
+                val intent = Intent(context, AgentForegroundService::class.java).apply {
+                    action = ACTION_START
+                    putExtra(EXTRA_TASK_ID, taskId)
+                    putExtra(EXTRA_PROJECT, project)
+                    putExtra(EXTRA_STATUS, status)
+                    putExtra(EXTRA_PROMPT, prompt)
+                }
+                ContextCompat.startForegroundService(context, intent)
             }
-            ContextCompat.startForegroundService(context, intent)
         }
 
         fun update(context: Context, taskId: String, status: String, details: String = "") {
-            val intent = Intent(context, AgentForegroundService::class.java).apply {
-                action = ACTION_UPDATE
-                putExtra(EXTRA_TASK_ID, taskId)
-                putExtra(EXTRA_STATUS, status)
-                putExtra(EXTRA_DETAILS, details)
+            runCatching {
+                val intent = Intent(context, AgentForegroundService::class.java).apply {
+                    action = ACTION_UPDATE
+                    putExtra(EXTRA_TASK_ID, taskId)
+                    putExtra(EXTRA_STATUS, status)
+                    putExtra(EXTRA_DETAILS, details)
+                }
+                context.startService(intent)
             }
-            context.startService(intent)
         }
 
         fun stop(context: Context) {
-            val intent = Intent(context, AgentForegroundService::class.java).apply {
-                action = ACTION_STOP
+            runCatching {
+                context.stopService(Intent(context, AgentForegroundService::class.java))
             }
-            context.startService(intent)
         }
     }
 }

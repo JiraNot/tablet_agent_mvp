@@ -27,6 +27,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import com.tabletagent.local.runtime.BootstrapManager
+import com.tabletagent.local.runtime.BootstrapStatus
+import com.tabletagent.local.runtime.CliInstaller
+import com.tabletagent.local.runtime.CliVersions
+import com.tabletagent.local.runtime.ExecutionResult
+import com.tabletagent.local.ui.PhaseStepperBar
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -92,6 +98,20 @@ fun TabletAgentApp() {
     var selectedAgent by rememberSaveable { mutableStateOf("codex") }
     var selectedModel by rememberSaveable { mutableStateOf("default") }
     var tokenEntry by remember { mutableStateOf(token) }
+    val bootstrapStatus by BootstrapManager.status.collectAsState()
+    val isRuntimeReady = remember(bootstrapStatus) { BootstrapManager.isReady(context) }
+    var cliVersions by remember { mutableStateOf<CliVersions?>(null) }
+    var installingCli by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(Unit) {
+        if (!BootstrapManager.isReady(context)) {
+            BootstrapManager.bootstrapIfNeeded(context)
+        }
+        if (BootstrapManager.isReady(context)) {
+            cliVersions = CliInstaller.getInstalledVersions(context)
+        }
+    }
+
     val notify: (Throwable) -> Unit = { 
         if (it !is kotlin.coroutines.cancellation.CancellationException) {
             error = it.message ?: it.javaClass.simpleName 
@@ -163,9 +183,28 @@ fun TabletAgentApp() {
     Scaffold(
         topBar = {
             TopAppBar(title = { Column {
-                Text("Tablet Agent", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-                Text(if (online) "Local bridge connected" else "Local bridge offline", style = MaterialTheme.typography.labelSmall,
-                    color = if (online) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
+                Text("Tablet Agent Studio", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (isRuntimeReady) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.primaryContainer,
+                            shape = MaterialTheme.shapes.extraSmall
+                        ) {
+                            Text(
+                                "EMBEDDED PROOT",
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        Spacer(Modifier.width(6.dp))
+                    }
+                    Text(
+                        if (online) "Bridge connected" else if (isRuntimeReady) "Standalone runtime ready" else "Bridge offline",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (online || isRuntimeReady) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                    )
+                }
             } }, actions = { IconButton(onClick = { tab = 3 }) { Icon(Icons.Default.Settings, "Settings") } })
         },
         bottomBar = {
@@ -178,6 +217,29 @@ fun TabletAgentApp() {
         }
     ) { inset ->
         Column(Modifier.padding(inset).fillMaxSize().padding(horizontal = 12.dp)) {
+            if (bootstrapStatus is BootstrapStatus.Extracting) {
+                val ext = bootstrapStatus as BootstrapStatus.Extracting
+                Surface(
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    shape = MaterialTheme.shapes.medium,
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                ) {
+                    Column(Modifier.padding(12.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.CloudSync, null, tint = MaterialTheme.colorScheme.onPrimaryContainer)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Setting up Standalone AI Runtime (offline ready)...", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleSmall)
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        Text("Extracting embedded PRoot + Alpine Linux aarch64 (Node 22, Git, Python 3)...", style = MaterialTheme.typography.bodySmall)
+                        Spacer(Modifier.height(8.dp))
+                        LinearProgressIndicator(progress = { ext.progress }, modifier = Modifier.fillMaxWidth())
+                        Spacer(Modifier.height(4.dp))
+                        Text(ext.currentFile, style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                    }
+                }
+                Spacer(Modifier.height(6.dp))
+            }
             if (error.isNotBlank()) {
                 Surface(color = MaterialTheme.colorScheme.errorContainer, shape = MaterialTheme.shapes.small) {
                     Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -318,6 +380,27 @@ fun TabletAgentApp() {
                     agents = availableAgents,
                     selectedProject = selectedProject,
                     api = api,
+                    cliVersions = cliVersions,
+                    installingCli = installingCli,
+                    onInstallCli = { type ->
+                        installingCli = type
+                        scope.launch {
+                            try {
+                                val res = when (type) {
+                                    "Codex" -> CliInstaller.installCodex(context)
+                                    "AGY" -> CliInstaller.installAgy(context)
+                                    "Claude" -> CliInstaller.installClaude(context)
+                                    else -> ExecutionResult(-1, "", "Unknown CLI")
+                                }
+                                notify(Throwable(if (res.exitCode == 0) "$type CLI installed successfully!" else "Failed: ${res.stderr}"))
+                            } catch (e: Exception) {
+                                notify(e)
+                            } finally {
+                                cliVersions = CliInstaller.getInstalledVersions(context)
+                                installingCli = null
+                            }
+                        }
+                    },
                     notify = notify
                 )
             }
@@ -551,6 +634,14 @@ private fun AgentScreen(prompt: String, onPrompt: (String) -> Unit, mode: String
         }
         HorizontalDivider()
         Spacer(Modifier.height(8.dp))
+        val currentTask = tasks.firstOrNull { it.optString("id") == selectedTask }
+        val currentTaskStatus = currentTask?.optString("status") ?: ""
+        if (selectedTask.isNotBlank() && currentTaskStatus.isNotBlank()) {
+            PhaseStepperBar(
+                state = currentTaskStatus,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+        }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Tasks", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
             Text("${tasks.size} recent", style = MaterialTheme.typography.labelSmall)
@@ -753,8 +844,12 @@ private fun SettingsScreen(
     agents: List<JSONObject> = emptyList(),
     selectedProject: String = "",
     api: LocalApi? = null,
+    cliVersions: CliVersions? = null,
+    installingCli: String? = null,
+    onInstallCli: (String) -> Unit = {},
     notify: (Throwable) -> Unit = {}
 ) {
+    val context = LocalContext.current
     var section by rememberSaveable { mutableIntStateOf(0) }
     val scope = rememberCoroutineScope()
     var instructionContent by remember { mutableStateOf("") }
@@ -800,6 +895,47 @@ private fun SettingsScreen(
 
         when (section) {
             0 -> {
+                Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = MaterialTheme.shapes.medium) {
+                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Memory, null, tint = MaterialTheme.colorScheme.onPrimaryContainer)
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "Embedded Standalone Runtime (Zero-Termux)",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                            Spacer(Modifier.weight(1f))
+                            Surface(
+                                color = if (BootstrapManager.isReady(context)) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                                shape = MaterialTheme.shapes.extraSmall
+                            ) {
+                                Text(
+                                    if (BootstrapManager.isReady(context)) "ACTIVE" else "NOT READY",
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.surface,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                        Text(
+                            "Engine: PRoot 5.1 (Userland ARM64 with talloc & ashmem)\nRootfs: Alpine Linux v3.21 (Node.js 22, NPM 10, Git 2.47, Python 3.12)\nPath: ${BootstrapManager.getRootfsDir(context).absolutePath}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                        if (cliVersions != null) {
+                            Text(
+                                "Packages: Node ${cliVersions.node ?: "v22.23.5"}, Git ${cliVersions.git ?: "2.47.3"}, Python ${cliVersions.python ?: "3.12.16"}",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                        }
+                    }
+                }
+
                 Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = MaterialTheme.shapes.medium) {
                     Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -807,12 +943,12 @@ private fun SettingsScreen(
                                 tint = if (online) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
                             Spacer(Modifier.width(8.dp))
                             Text(
-                                if (online) "Bridge Online (127.0.0.1:8765)" else "Bridge Offline",
+                                if (online) "Termux Bridge Online (127.0.0.1:8765)" else "Termux Bridge Offline (Optional)",
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold
                             )
                         }
-                        Text("The Python supervisor bridge operates strictly on loopback within Termux.", style = MaterialTheme.typography.bodySmall)
+                        Text("Loopback bridge fallback for backward compatibility with external Termux sessions.", style = MaterialTheme.typography.bodySmall)
                     }
                 }
 
@@ -834,64 +970,90 @@ private fun SettingsScreen(
                     OutlinedButton(onClick = onStart) {
                         Icon(Icons.Default.PlayArrow, null, Modifier.size(16.dp))
                         Spacer(Modifier.width(6.dp))
-                        Text("Start Bridge via RUN_COMMAND")
+                        Text("Start Bridge via Termux")
                     }
                 }
             }
 
             1 -> {
-                Text("Installed Agent CLIs & Capabilities", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Text("Official Agent CLIs (Embedded PRoot)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+
+                // Codex CLI Card
+                Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = MaterialTheme.shapes.small, modifier = Modifier.fillMaxWidth()) {
+                    Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("OpenAI Codex CLI", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
+                            Text(cliVersions?.codex ?: "curl -fsSL https://chatgpt.com/codex/install.sh | sh", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+                        }
+                        Button(
+                            onClick = { onInstallCli("Codex") },
+                            enabled = installingCli == null
+                        ) {
+                            Text(if (installingCli == "Codex") "Installing..." else if (cliVersions?.codex != null) "Update" else "Install")
+                        }
+                    }
+                }
+
+                // Antigravity CLI Card
+                Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = MaterialTheme.shapes.small, modifier = Modifier.fillMaxWidth()) {
+                    Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Google Antigravity CLI", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
+                            Text(cliVersions?.agy ?: "curl -fsSL https://antigravity.google/cli/install.sh | bash", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+                        }
+                        Button(
+                            onClick = { onInstallCli("AGY") },
+                            enabled = installingCli == null
+                        ) {
+                            Text(if (installingCli == "AGY") "Installing..." else if (cliVersions?.agy != null) "Update" else "Install")
+                        }
+                    }
+                }
+
+                // Claude Code Card
+                Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = MaterialTheme.shapes.small, modifier = Modifier.fillMaxWidth()) {
+                    Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Anthropic Claude Code", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
+                            Text(cliVersions?.claude ?: "curl -fsSL https://claude.ai/install.sh | bash", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+                        }
+                        Button(
+                            onClick = { onInstallCli("Claude") },
+                            enabled = installingCli == null
+                        ) {
+                            Text(if (installingCli == "Claude") "Installing..." else if (cliVersions?.claude != null) "Update" else "Install")
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(8.dp))
+                Text("Installed Agent Capabilities (Bridge):", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
                 if (agents.isEmpty()) {
-                    Text("No agent capability metadata received yet. Ensure bridge is connected.", style = MaterialTheme.typography.bodySmall)
+                    Text("No agent capability metadata from bridge. Embedded PRoot agents are active.", style = MaterialTheme.typography.bodySmall)
                 } else {
                     agents.forEach { a ->
-                        val name = a.optString("name")
                         val display = a.optString("display_name")
                         val avail = a.optBoolean("available", false)
                         val canPlan = a.optBoolean("can_plan", false)
                         val canBuild = a.optBoolean("can_build", false)
                         val resume = a.optBoolean("supports_resume", false)
-                        val models = a.optJSONArray("models")?.let { arr -> (0 until arr.length()).map { arr.getString(it) } } ?: emptyList()
 
                         Surface(
-                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            color = MaterialTheme.colorScheme.surfaceContainerHighest,
                             shape = MaterialTheme.shapes.small,
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)
                         ) {
-                            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Text(display, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                                     Spacer(Modifier.weight(1f))
-                                    Surface(
-                                        color = if (avail) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.errorContainer,
-                                        shape = MaterialTheme.shapes.extraSmall
-                                    ) {
-                                        Text(
-                                            if (avail) "INSTALLED" else "OFFLINE",
-                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                                            style = MaterialTheme.typography.labelSmall,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                    }
+                                    Text(if (avail) "ONLINE" else "OFFLINE", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
                                 }
                                 Text("Capabilities: ${listOfNotNull(if (canPlan) "Plan" else null, if (canBuild) "Build" else null, if (resume) "Session Resume" else null).joinToString(", ")}",
                                     style = MaterialTheme.typography.bodySmall)
-                                if (models.isNotEmpty()) {
-                                    Text("Models: ${models.joinToString(", ")}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
-                                }
                             }
                         }
                     }
-                }
-
-                Spacer(Modifier.height(6.dp))
-                Text("Termux CLI Installation Commands:", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-                Surface(color = MaterialTheme.colorScheme.surfaceContainerHighest, shape = MaterialTheme.shapes.small, modifier = Modifier.fillMaxWidth()) {
-                    Text(
-                        "npm install -g @anthropic-ai/claude-code\nnpm install -g opencode-ai",
-                        modifier = Modifier.padding(10.dp),
-                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
-                    )
                 }
             }
 

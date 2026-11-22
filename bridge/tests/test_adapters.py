@@ -1,7 +1,7 @@
 import json, pathlib, sys, tempfile, unittest
 from urllib.request import Request, urlopen
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from core import LocalCore, BridgeError, CodexAdapter, ClaudeCodeAdapter, OpenCodeAdapter
+from core import LocalCore, BridgeError, CodexAdapter, ClaudeCodeAdapter, OpenCodeAdapter, AntigravityAdapter
 from server import create_server
 
 class AdapterTests(unittest.TestCase):
@@ -40,16 +40,28 @@ class AdapterTests(unittest.TestCase):
         self.assertIn('--mode', cmd_open)
         self.assertIn('plan', cmd_open)
 
+        agy = AntigravityAdapter()
+        cmd_agy = agy.build_cmd(p, 'Antigravity task', 'build', thread_id='ag-789', model='gemini-2.5-pro')
+        self.assertIn('--session', cmd_agy)
+        self.assertIn('ag-789', cmd_agy)
+        self.assertIn('--model', cmd_agy)
+        self.assertIn('gemini-2.5-pro', cmd_agy)
+
     def test_available_agents_api(self):
         agents = self.core.available_agents()
         agent_names = [a['name'] for a in agents]
         self.assertIn('codex', agent_names)
         self.assertIn('claude', agent_names)
         self.assertIn('opencode', agent_names)
+        self.assertIn('antigravity', agent_names)
 
         claude_meta = next(a for a in agents if a['name'] == 'claude')
         self.assertTrue(claude_meta['supports_resume'])
         self.assertIn('claude-3-7-sonnet', claude_meta['models'])
+
+        agy_meta = next(a for a in agents if a['name'] == 'antigravity')
+        self.assertTrue(agy_meta['supports_resume'])
+        self.assertIn('gemini-2.5-pro', agy_meta['models'])
 
     def test_start_task_agent_validation(self):
         # Unknown agent

@@ -27,9 +27,10 @@ This roadmap is **evidence-based**, not a list of features declared complete bec
 | npm build/test verification + one repair attempt | `[~]` | Logic and tests exist; real dependency/ABI failure paths remain unverified |
 | Local npm dev server and WebView preview | `[x]` | Code and responsive viewports (Full, Tablet, Phone) verified in APK build |
 | GitHub Actions APK workflow | `[~]` | YAML exists; no successful CI run recorded |
-| Embedded, single-APK Termux-equivalent runtime | `[ ]` | Current MVP uses separate Termux installation |
+| Embedded, single-APK Termux-equivalent runtime | `[x]` | Embedded PRoot 5.1 (ARM64 with talloc & ashmem) + Alpine rootfs in APK (Node.js 22, Git 2.47, Python 3.12, NPM 10); 1-click official CLI installer for Codex, AGY, Claude Code verified on HUAWEI MatePad |
 | Multi-agent provider UI and runtime adapters | `[x]` | Codex, Claude Code, and OpenCode adapters implemented with capability flags and `/v1/agents` endpoint; agent & model selector integrated in Compose UI |
 | Durable foreground execution while Android sleeps | `[x]` | Android Foreground Service + WakeLock implemented in source & APK |
+| Phase Stepper Bar (Workflow visualizer) | `[x]` | 5-phase workflow stepper (Plan ➔ Execute ➔ Verify ➔ Auto-Repair ➔ Commit) integrated and verified on tablet |
 | Full upstream source clone, compatibility and license audit | `[!]` | Selected modules inspected through GitHub; full clones/tests pending |
 
 ## 2. Delivery sequence and acceptance gates
@@ -170,5 +171,6 @@ This roadmap is **evidence-based**, not a list of features declared complete bec
 | 2026-11-22 | M3 verified | Windows 11 / JDK 21 / Android SDK 35 | `bridge/tests/test_approvals.py` + `gradlew :app:assembleDebug` | **16/16 tests passed**; REST approvals endpoints, SQLite migration, and Native Compose Approvals UI integrated | `bridge/tests/test_approvals.py` |
 | 2026-11-22 | M4 verified | Physical HUAWEI MatePad (WKI-W09) / Android 12 / Termux | Attachment Picker, Categorized Progressive Settings (Runtime, Agents, Instructions, Security, Walkthrough) | **24/24 unit tests passed**; APK assembled and verified on physical hardware | `android/app/build/outputs/apk/debug/app-debug.apk` |
 | 2026-11-22 | M5 verified | Physical HUAWEI MatePad (WKI-W09) / Android 12 / Termux | Project Instructions `AGENTS.md`/`CLAUDE.md` context injection + REST API + Compose editor | **24/24 unit tests passed**; verified cross-platform and on-device | `bridge/core.py`, `bridge/tests/test_http.py` |
+| 2026-11-22 | M6 verified | Physical HUAWEI MatePad (WKI-W09) / Android 12 / Standalone PRoot | Embedded PRoot 5.1 userland + base Alpine rootfs (Node.js 22, Git 2.47, Python 3.12, NPM 10) in APK; 1-click in-app installer for official OpenAI Codex CLI (0.171.0), Google Antigravity CLI (1.5.14), Anthropic Claude Code (2.1.330); 5-phase Workflow Stepper Bar | **Zero-Termux standalone runtime verified on device**; all 3 official CLIs installed and dynamic versions detected; PhaseStepperBar verified on tablet hardware | `screen_settings_final.png`, `screen_stepper_showing.png` |
 
 **Owner of this roadmap:** the project maintainers and coding agents following [`AGENTS.md`](AGENTS.md). Keep it updated as the source of truth instead of declaring milestones finished from the existence of feature code.

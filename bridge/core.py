@@ -43,8 +43,30 @@ class BaseAgentAdapter:
         self.supports_resume = supports_resume
         self.models = models
 
+    def _resolve_binary(self, project_path: Path | None = None) -> list[str]:
+        if shutil.which(self.binary):
+            return [self.binary]
+        user_bin = Path.home() / '.local' / 'bin' / self.binary
+        if user_bin.is_file() and os.access(user_bin, os.X_OK):
+            return [str(user_bin)]
+        proot_deb_bin = Path('/data/data/com.termux/files/usr/var/lib/proot-distro/containers/debian/rootfs/root/.local/bin') / self.binary
+        if proot_deb_bin.is_file() and shutil.which('proot-distro'):
+            prefix = ['proot-distro', 'login', 'debian']
+            if project_path:
+                prefix += ['--bind', f'{project_path}:{project_path}', '--workdir', str(project_path)]
+            return prefix + ['--', f'/root/.local/bin/{self.binary}']
+        return [self.binary]
+
     def is_available(self) -> bool:
-        return bool(shutil.which(self.binary))
+        if shutil.which(self.binary):
+            return True
+        user_bin = Path.home() / '.local' / 'bin' / self.binary
+        if user_bin.is_file() and os.access(user_bin, os.X_OK):
+            return True
+        proot_deb_bin = Path('/data/data/com.termux/files/usr/var/lib/proot-distro/containers/debian/rootfs/root/.local/bin') / self.binary
+        if proot_deb_bin.is_file() and shutil.which('proot-distro'):
+            return True
+        return False
 
     def build_cmd(self, project_path: Path, prompt: str, mode: str, thread_id: str | None = None, model: str = '') -> list[str]:
         raise NotImplementedError
@@ -62,7 +84,8 @@ class CodexAdapter(BaseAgentAdapter):
         )
 
     def build_cmd(self, project_path: Path, prompt: str, mode: str, thread_id: str | None = None, model: str = '') -> list[str]:
-        cmd = [self.binary, 'exec', '--json', '--sandbox', 'read-only' if mode == 'plan' else 'workspace-write', '--skip-git-repo-check']
+        bin_cmd = self._resolve_binary(project_path)
+        cmd = bin_cmd + ['exec', '--json', '--sandbox', 'read-only' if mode == 'plan' else 'workspace-write', '--skip-git-repo-check']
         if thread_id and self.supports_resume:
             cmd += ['resume', thread_id]
         if model and model != 'default':
@@ -83,7 +106,8 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
         )
 
     def build_cmd(self, project_path: Path, prompt: str, mode: str, thread_id: str | None = None, model: str = '') -> list[str]:
-        cmd = [self.binary, '--print', '--output-format', 'stream-json']
+        bin_cmd = self._resolve_binary(project_path)
+        cmd = bin_cmd + ['--print', '--output-format', 'stream-json']
         if thread_id and self.supports_resume:
             cmd += ['--resume', thread_id]
         if model and model != 'default':
@@ -104,7 +128,30 @@ class OpenCodeAdapter(BaseAgentAdapter):
         )
 
     def build_cmd(self, project_path: Path, prompt: str, mode: str, thread_id: str | None = None, model: str = '') -> list[str]:
-        cmd = [self.binary, 'run', '--mode', mode]
+        bin_cmd = self._resolve_binary(project_path)
+        cmd = bin_cmd + ['run', '--mode', mode]
+        if model and model != 'default':
+            cmd += ['--model', model]
+        cmd.append(prompt)
+        return cmd
+
+class AntigravityAdapter(BaseAgentAdapter):
+    def __init__(self):
+        super().__init__(
+            name='antigravity',
+            display_name='Antigravity CLI (agy)',
+            binary='agy',
+            can_plan=True,
+            can_build=True,
+            supports_resume=True,
+            models=['default', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash']
+        )
+
+    def build_cmd(self, project_path: Path, prompt: str, mode: str, thread_id: str | None = None, model: str = '') -> list[str]:
+        bin_cmd = self._resolve_binary(project_path)
+        cmd = bin_cmd + ['run', '--mode', mode]
+        if thread_id and self.supports_resume:
+            cmd += ['--session', thread_id]
         if model and model != 'default':
             cmd += ['--model', model]
         cmd.append(prompt)
@@ -127,7 +174,8 @@ class LocalCore:
         self.adapters: dict[str, BaseAgentAdapter] = {
             'codex': CodexAdapter(),
             'claude': ClaudeCodeAdapter(),
-            'opencode': OpenCodeAdapter()
+            'opencode': OpenCodeAdapter(),
+            'antigravity': AntigravityAdapter()
         }
         self._init_db()
         self._recover_interrupted()
