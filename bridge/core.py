@@ -181,14 +181,16 @@ class CodexAdapter(BaseAgentAdapter):
             ]
         )
 
+    def sandbox_for_mode(self, mode: str, sandbox_override: str | None = None) -> str:
+        if mode == 'plan':
+            return 'read-only'
+        if sandbox_override == 'danger-full-access':
+            return 'danger-full-access'
+        return 'workspace-write'
+
     def build_cmd(self, project_path: Path, prompt: str, mode: str, thread_id: str | None = None, model: str = '', sandbox_override: str | None = None) -> list[str]:
         bin_cmd = self._resolve_binary(project_path)
-        if mode == 'plan':
-            sandbox = 'read-only'
-        elif sandbox_override == 'danger-full-access':
-            sandbox = 'danger-full-access'
-        else:
-            sandbox = 'workspace-write'
+        sandbox = self.sandbox_for_mode(mode, sandbox_override)
         cmd = bin_cmd + ['exec', '--json', '--sandbox', sandbox, '--skip-git-repo-check']
         if thread_id and self.supports_resume:
             cmd += ['resume', thread_id]
@@ -196,6 +198,71 @@ class CodexAdapter(BaseAgentAdapter):
             cmd += ['--model', model]
         cmd.append(prompt)
         return cmd
+
+    def build_app_server_cmd(self, project_path: Path) -> list[str]:
+        return self._resolve_binary(project_path) + ['app-server', '--stdio']
+
+    def build_app_server_handshake(
+        self,
+        project_path: Path,
+        mode: str,
+        thread_id: str | None = None,
+        model: str = '',
+        sandbox_override: str | None = None,
+    ) -> list[dict[str, Any]]:
+        sandbox = self.sandbox_for_mode(mode, sandbox_override)
+        thread_params: dict[str, Any] = {
+            'cwd': str(project_path),
+            'sandbox': sandbox,
+            'approvalPolicy': 'on-request',
+        }
+        if model and model != 'default':
+            thread_params['model'] = model
+        if thread_id and self.supports_resume:
+            thread_params['threadId'] = thread_id
+            thread_params['excludeTurns'] = True
+            thread_req = {'jsonrpc': '2.0', 'id': 2, 'method': 'thread/resume', 'params': thread_params}
+        else:
+            thread_req = {'jsonrpc': '2.0', 'id': 2, 'method': 'thread/start', 'params': thread_params}
+        return [
+            {
+                'jsonrpc': '2.0',
+                'id': 1,
+                'method': 'initialize',
+                'params': {
+                    'clientInfo': {'name': 'tablet-agent', 'title': 'Tablet Agent Studio', 'version': '0.1.0'},
+                    'capabilities': None,
+                },
+            },
+            {'jsonrpc': '2.0', 'method': 'initialized'},
+            thread_req,
+        ]
+
+    def build_turn_start_request(self, thread_id: str, prompt: str, req_id: int = 3) -> dict[str, Any]:
+        return {
+            'jsonrpc': '2.0',
+            'id': req_id,
+            'method': 'turn/start',
+            'params': {
+                'threadId': thread_id,
+                'input': [{'type': 'text', 'text': prompt, 'text_elements': []}],
+            },
+        }
+
+    def build_turn_interrupt_request(self, thread_id: str, turn_id: str, req_id: int = 99) -> dict[str, Any]:
+        return {
+            'jsonrpc': '2.0',
+            'id': req_id,
+            'method': 'turn/interrupt',
+            'params': {'threadId': thread_id, 'turnId': turn_id},
+        }
+
+    def build_approval_response(self, rpc_id: Any, method: str, allowed: bool) -> dict[str, Any]:
+        if method in {'execCommandApproval', 'applyPatchApproval'}:
+            decision: Any = 'approved' if allowed else {'denied': {'rejection': 'Denied by user'}}
+        else:
+            decision = 'accept' if allowed else 'decline'
+        return {'jsonrpc': '2.0', 'id': rpc_id, 'result': {'decision': decision}}
 
 class ClaudeCodeAdapter(BaseAgentAdapter):
     def __init__(self):
@@ -299,6 +366,7 @@ class LocalCore:
         self.token = self._load_token()
         self.lock = threading.RLock()
         self.procs: dict[str, subprocess.Popen] = {}
+        self.app_server_turns: dict[str, tuple[subprocess.Popen, str, str]] = {}
         self.thread_candidates: dict[str, str] = {}
         self.previews: dict[str, dict[str, Any]] = {}
         self.approval_events: dict[str, threading.Event] = {}
@@ -445,20 +513,23 @@ class LocalCore:
         with self._db() as db:
             rows = db.execute('SELECT key, value FROM settings').fetchall()
         raw = {r['key']: r['value'] for r in rows}
+        default_app_server = 'true' if os.environ.get('TABLET_AGENT_EMBEDDED') == '1' else 'false'
         return {
-            'codex_proot_sandbox_bypass': raw.get('codex_proot_sandbox_bypass', 'false') == 'true'
+            'codex_proot_sandbox_bypass': raw.get('codex_proot_sandbox_bypass', 'false') == 'true',
+            'codex_use_app_server': raw.get('codex_use_app_server', default_app_server) == 'true',
         }
 
     def update_settings(self, patch: dict[str, Any]) -> dict[str, Any]:
-        if 'codex_proot_sandbox_bypass' in patch:
-            val = patch['codex_proot_sandbox_bypass']
-            if not isinstance(val, bool):
-                raise BridgeError('codex_proot_sandbox_bypass must be a boolean')
-            with self._db() as db:
-                db.execute(
-                    'INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
-                    ('codex_proot_sandbox_bypass', 'true' if val else 'false')
-                )
+        for key in ('codex_proot_sandbox_bypass', 'codex_use_app_server'):
+            if key in patch:
+                val = patch[key]
+                if not isinstance(val, bool):
+                    raise BridgeError(f'{key} must be a boolean')
+                with self._db() as db:
+                    db.execute(
+                        'INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                        (key, 'true' if val else 'false')
+                    )
         return self.get_settings()
 
     def _project(self, name: str) -> Path:
@@ -857,6 +928,255 @@ class LocalCore:
             with self.lock:
                 if self.procs.get(task_id) is proc: self.procs.pop(task_id,None)
 
+    def _run_codex_app_server(
+        self,
+        task_id: str,
+        adapter: CodexAdapter,
+        project_path: Path,
+        prompt: str,
+        mode: str,
+        thread_id: str | None = None,
+        model: str = '',
+        sandbox_override: str | None = None,
+        timeout: float = 1800,
+    ) -> tuple[int, str]:
+        cmd = adapter.build_app_server_cmd(project_path)
+        self.append(task_id, 'log', f'Starting agent (app-server JSON-RPC): {cmd[0]} (arguments hidden)')
+        exec_cmd = shutil.which(cmd[0]) or cmd[0]
+        actual_cmd = [exec_cmd] + cmd[1:]
+        proc = subprocess.Popen(
+            actual_cmd,
+            cwd=str(project_path),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors='replace',
+            bufsize=1,
+            start_new_session=True,
+        )
+        pid_key = f'task:{task_id}'
+        self._register_pid(pid_key, proc, Path(actual_cmd[0]).stem or cmd[0])
+        with self.lock:
+            self.procs[task_id] = proc
+        lines: list[str] = []
+        done_marker = False
+        fail_marker = False
+        active_thread_id = thread_id or ''
+        active_turn_id = ''
+        delta_buffers: dict[str, list[str]] = {}
+        emitted_messages: set[str] = set()
+
+        def send_rpc(payload: dict[str, Any]) -> bool:
+            try:
+                if proc.stdin and proc.poll() is None:
+                    proc.stdin.write(json.dumps(payload, ensure_ascii=False) + '\n')
+                    proc.stdin.flush()
+                    return True
+            except OSError:
+                pass
+            return False
+
+        done = threading.Event()
+        def timeout_kill():
+            if not done.wait(timeout):
+                self._kill(proc)
+        threading.Thread(target=timeout_kill, daemon=True).start()
+
+        try:
+            for msg in adapter.build_app_server_handshake(project_path, mode, thread_id, model, sandbox_override):
+                send_rpc(msg)
+
+            for raw in proc.stdout or []:
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    self.append(task_id, 'log', line[:800])
+                    if 'cannot establish app-server socket mount isolation' in line:
+                        lines.append(line[:800])
+                    continue
+
+                if not isinstance(data, dict):
+                    continue
+
+                rpc_id = data.get('id')
+                method = data.get('method', '')
+                params = data.get('params') or {}
+
+                # Server-initiated JSON-RPC request (both 'method' and 'id' present)
+                if method and rpc_id is not None:
+                    if method in {
+                        'item/commandExecution/requestApproval',
+                        'execCommandApproval',
+                        'item/fileChange/requestApproval',
+                        'applyPatchApproval',
+                        'item/permissions/requestApproval',
+                    }:
+                        raw_cmd = params.get('command')
+                        if isinstance(raw_cmd, list):
+                            cmd_str = ' '.join(str(x) for x in raw_cmd)
+                        else:
+                            cmd_str = str(raw_cmd or params.get('grantRoot') or params.get('reason') or method)
+                        action_type = 'command_execution' if 'command' in method.lower() else 'file_change'
+                        allowed = self.request_approval(task_id, action_type, cmd_str)
+                        if not allowed:
+                            lines.append(f'Approval denied for: {cmd_str}')
+                        send_rpc(adapter.build_approval_response(rpc_id, method, allowed))
+                    else:
+                        send_rpc({'jsonrpc': '2.0', 'id': rpc_id, 'result': {}})
+                    continue
+
+                # Response to client-initiated JSON-RPC requests
+                if rpc_id in (2, 20):
+                    if 'error' in data:
+                        if rpc_id == 2 and thread_id:
+                            # Fallback from thread/resume to fresh thread/start
+                            fresh = adapter.build_app_server_handshake(project_path, mode, None, model, sandbox_override)[-1]
+                            fresh['id'] = 20
+                            send_rpc(fresh)
+                            continue
+                        fail_marker = True
+                        err_txt = json.dumps(data['error'], ensure_ascii=False)[:1800]
+                        lines.append(err_txt)
+                        self.append(task_id, 'error', err_txt)
+                        break
+                    res_thread = (data.get('result') or {}).get('thread') or {}
+                    tid = res_thread.get('id', '') or active_thread_id
+                    if isinstance(tid, str) and tid:
+                        active_thread_id = tid
+                        self.thread_candidates[task_id] = tid
+                        self.append(task_id, 'thread', tid)
+                        with self.lock:
+                            self.app_server_turns[task_id] = (proc, active_thread_id, active_turn_id)
+                        send_rpc(adapter.build_turn_start_request(tid, prompt, req_id=3))
+                    continue
+
+                if rpc_id == 3:
+                    if 'error' in data:
+                        fail_marker = True
+                        err_txt = json.dumps(data['error'], ensure_ascii=False)[:1800]
+                        lines.append(err_txt)
+                        self.append(task_id, 'error', err_txt)
+                        break
+                    res_turn = (data.get('result') or {}).get('turn') or {}
+                    t_id = res_turn.get('id', '')
+                    if isinstance(t_id, str) and t_id:
+                        active_turn_id = t_id
+                        with self.lock:
+                            self.app_server_turns[task_id] = (proc, active_thread_id, active_turn_id)
+                    continue
+
+                if rpc_id is not None and 'error' in data:
+                    fail_marker = True
+                    err_txt = json.dumps(data['error'], ensure_ascii=False)[:1800]
+                    lines.append(err_txt)
+                    self.append(task_id, 'error', err_txt)
+                    break
+
+                # Server notifications
+                if method == 'thread/started':
+                    tid = ((params.get('thread') or {}).get('id', ''))
+                    if isinstance(tid, str) and len(tid) > 6 and tid != active_thread_id:
+                        active_thread_id = tid
+                        self.thread_candidates[task_id] = tid
+                        self.append(task_id, 'thread', tid)
+                elif method == 'turn/started':
+                    t_id = ((params.get('turn') or {}).get('id', ''))
+                    if isinstance(t_id, str) and t_id:
+                        active_turn_id = t_id
+                        with self.lock:
+                            self.app_server_turns[task_id] = (proc, active_thread_id, active_turn_id)
+                elif method in {'item/agentMessage/delta', 'item/plan/delta'}:
+                    item_id = str(params.get('itemId', 'default'))
+                    delta = str(params.get('delta', ''))
+                    if delta:
+                        delta_buffers.setdefault(item_id, []).append(delta)
+                elif method in {'item/started', 'item/completed'}:
+                    item = params.get('item') or {}
+                    itype = item.get('type', '')
+                    item_id = str(item.get('id', ''))
+                    if itype in {'agentMessage', 'plan', 'agent_message'} and method == 'item/completed':
+                        msg = item.get('text', '') or ''.join(delta_buffers.pop(item_id, []))
+                        if msg and (not item_id or item_id not in emitted_messages):
+                            if item_id:
+                                emitted_messages.add(item_id)
+                            lines.append(msg[:1500])
+                            self.append(task_id, 'message', msg)
+                    elif itype in {'commandExecution', 'fileChange', 'mcpToolCall', 'dynamicToolCall', 'command_execution', 'file_change'}:
+                        norm_type = (
+                            'command_execution' if itype in {'commandExecution', 'command_execution'}
+                            else ('file_change' if itype in {'fileChange', 'file_change'} else itype)
+                        )
+                        status = item.get('status', 'in_progress' if method == 'item/started' else 'completed')
+                        self.append(task_id, 'tool', f'{norm_type}: {status}')
+                        cmd_target = str(item.get('command', item.get('target', '')))
+                        if cmd_target and self.is_destructive_command(cmd_target):
+                            if not self.request_approval(task_id, 'confirm_destructive', cmd_target):
+                                fail_marker = True
+                                self.append(task_id, 'error', f'Destructive command blocked by user policy: {cmd_target}')
+                                if active_thread_id and active_turn_id:
+                                    send_rpc(adapter.build_turn_interrupt_request(active_thread_id, active_turn_id))
+                                self._kill(proc)
+                                break
+                elif method == 'turn/completed':
+                    turn = params.get('turn') or {}
+                    for item in (turn.get('items') or []):
+                        if not isinstance(item, dict):
+                            continue
+                        if item.get('type') in {'agentMessage', 'plan', 'agent_message'}:
+                            item_id = str(item.get('id', ''))
+                            msg = item.get('text', '') or ''.join(delta_buffers.pop(item_id, []))
+                            if msg and (not item_id or item_id not in emitted_messages):
+                                if item_id:
+                                    emitted_messages.add(item_id)
+                                lines.append(msg[:1500])
+                                self.append(task_id, 'message', msg)
+                    tstatus = turn.get('status', 'completed')
+                    if tstatus == 'failed' or turn.get('error'):
+                        fail_marker = True
+                        err_obj = turn.get('error') or {'status': tstatus}
+                        err_txt = json.dumps(err_obj, ensure_ascii=False)[:1800]
+                        lines.append(err_txt)
+                        self.append(task_id, 'error', err_txt)
+                    elif tstatus == 'interrupted':
+                        fail_marker = True
+                    else:
+                        done_marker = True
+                    break
+                elif method == 'error':
+                    fail_marker = True
+                    err_txt = json.dumps(params, ensure_ascii=False)[:1800]
+                    lines.append(err_txt)
+                    self.append(task_id, 'error', err_txt)
+                    break
+
+            self._kill(proc)
+            if not done_marker or fail_marker:
+                if not fail_marker and self.task(task_id)['status'] != 'CANCELLED':
+                    self.append(task_id, 'error', 'Agent app-server did not report turn completion')
+                return 90, '\n'.join(lines)[-6000:]
+            return 0, '\n'.join(lines)[-6000:]
+        finally:
+            done.set()
+            if proc.stdin:
+                try:
+                    proc.stdin.close()
+                except OSError:
+                    pass
+            if proc.stdout:
+                try:
+                    proc.stdout.close()
+                except OSError:
+                    pass
+            self._unregister_pid(pid_key)
+            with self.lock:
+                self.app_server_turns.pop(task_id, None)
+                if self.procs.get(task_id) is proc:
+                    self.procs.pop(task_id, None)
+
     def _kill(self, proc: subprocess.Popen):
         if proc.poll() is not None: return
         try:
@@ -880,11 +1200,21 @@ class LocalCore:
         self.set_status(task_id,'CANCELLED')
         with self.lock:
             proc=self.procs.get(task_id)
+            turn_info=self.app_server_turns.get(task_id)
             with self._db() as db:
                 for r in db.execute("SELECT id FROM approvals WHERE task_id=? AND status='PENDING'", (task_id,)):
                     evt = self.approval_events.get(r['id'])
                     if evt: evt.set()
                 db.execute("UPDATE approvals SET status='DENIED', resolved_at=? WHERE task_id=? AND status='PENDING'", (time.time(), task_id))
+        if turn_info:
+            t_proc, t_tid, t_turn = turn_info
+            if t_tid and t_turn and t_proc.stdin and t_proc.poll() is None:
+                try:
+                    req = {'jsonrpc': '2.0', 'id': 99, 'method': 'turn/interrupt', 'params': {'threadId': t_tid, 'turnId': t_turn}}
+                    t_proc.stdin.write(json.dumps(req) + '\n')
+                    t_proc.stdin.flush()
+                except OSError:
+                    pass
         if proc: self._kill(proc)
         return self.task(task_id)
 
@@ -999,12 +1329,20 @@ class LocalCore:
         thread = self._thread_for_project(rec['project'], agent_name)
         effective_prompt = turn_prompt if (turn_prompt and turn_prompt.strip()) else rec['prompt']
         prompt_text = f'{policy}{instructions}\n\nUser task:\n{effective_prompt}'
-        if agent_name == 'codex' and mode == 'build' and self.get_settings().get('codex_proot_sandbox_bypass'):
-            cmd = adapter.build_cmd(project_path, prompt_text, mode, thread, model, sandbox_override='danger-full-access')
+        settings = self.get_settings()
+        sandbox_override = 'danger-full-access' if (agent_name == 'codex' and mode == 'build' and settings.get('codex_proot_sandbox_bypass')) else None
+        use_app_server = bool(agent_name == 'codex' and isinstance(adapter, CodexAdapter) and settings.get('codex_use_app_server'))
+        if sandbox_override:
+            cmd = adapter.build_cmd(project_path, prompt_text, mode, thread, model, sandbox_override=sandbox_override)
         else:
             cmd = adapter.build_cmd(project_path, prompt_text, mode, thread, model)
         try:
-            rc, output=self._run(task_id,cmd,project_path,timeout=1800,phase='agent')
+            if use_app_server and isinstance(adapter, CodexAdapter):
+                rc, output = self._run_codex_app_server(
+                    task_id, adapter, project_path, prompt_text, mode, thread, model, sandbox_override=sandbox_override, timeout=1800
+                )
+            else:
+                rc, output=self._run(task_id,cmd,project_path,timeout=1800,phase='agent')
             if self.task(task_id)['status']=='CANCELLED': return
             if agent_name == 'codex' and mode == 'build' and 'cannot establish app-server socket mount isolation' in output:
                 self.append(task_id, 'error', 'Codex Linux sandbox is blocked in Android PRoot. Enable the opt-in Codex PRoot Build toggle in Settings -> Security to allow workspace writes.')
@@ -1053,8 +1391,13 @@ class LocalCore:
                             'Fix these errors within the workspace, rerun your own checks, and report changes. '
                             'Do not access credentials or deploy.')
                 fix_thread = self._thread_for_project(rec['project'], agent_name)
-                fix_cmd = adapter.build_cmd(project_path, fix_prompt, 'build', fix_thread, model)
-                rc,repair_output=self._run(task_id,fix_cmd,project_path,timeout=1200,phase='agent')
+                if use_app_server and isinstance(adapter, CodexAdapter):
+                    rc, repair_output = self._run_codex_app_server(
+                        task_id, adapter, project_path, fix_prompt, 'build', fix_thread, model, sandbox_override=sandbox_override, timeout=1200
+                    )
+                else:
+                    fix_cmd = adapter.build_cmd(project_path, fix_prompt, 'build', fix_thread, model, sandbox_override=sandbox_override) if sandbox_override else adapter.build_cmd(project_path, fix_prompt, 'build', fix_thread, model)
+                    rc,repair_output=self._run(task_id,fix_cmd,project_path,timeout=1200,phase='agent')
                 if self.task(task_id)['status']=='CANCELLED':return
                 if rc:
                     self.set_status(task_id,'FAILED',error='Agent repair attempt failed',verification=verify_output,result=repair_output);return
