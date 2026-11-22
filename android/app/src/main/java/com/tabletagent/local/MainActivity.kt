@@ -52,6 +52,7 @@ import com.tabletagent.local.ui.AionClaudeAgentPane
 import com.tabletagent.local.ui.AionClaudeSidebar
 import com.tabletagent.local.ui.ClaudeCodeTopBar
 import com.tabletagent.local.ui.CliOAuthDialog
+import com.tabletagent.local.ui.HermesMemoryDialog
 import com.tabletagent.local.ui.OfficialCliCard
 import com.tabletagent.local.ui.PhaseStepperBar
 import com.tabletagent.local.ui.ProviderApiKeysCard
@@ -121,6 +122,11 @@ fun TabletAgentApp() {
     var fileName by remember { mutableStateOf("") }
     var fileBody by remember { mutableStateOf("") }
     var error by remember { mutableStateOf("") }
+    val notify: (Throwable) -> Unit = { 
+        if (it !is kotlin.coroutines.cancellation.CancellationException) {
+            error = it.message ?: it.javaClass.simpleName 
+        }
+    }
     var createDialog by remember { mutableStateOf(false) }
     var gitReviewDialog by remember { mutableStateOf(false) }
     var pickerExpanded by remember { mutableStateOf(false) }
@@ -138,6 +144,58 @@ fun TabletAgentApp() {
     var cliAuthStatus by remember { mutableStateOf(AllCliAuthStatus()) }
     var keySummary by remember { mutableStateOf(SecureSecrets.getSummary(context)) }
     var authBusy by remember { mutableStateOf(false) }
+    var detectedApks by remember { mutableStateOf<List<JSONObject>>(emptyList()) }
+    var hermesMemoryData by remember { mutableStateOf<JSONObject?>(null) }
+    var showHermesMemoryDialog by remember { mutableStateOf(false) }
+
+    val launchInstallApk: (String) -> Unit = { apkPath ->
+        try {
+            val rootfsWs = java.io.File(context.filesDir, "runtime/rootfs/root/tablet-agent/workspaces/$selectedProject")
+            val candidate1 = java.io.File(rootfsWs, apkPath)
+            val candidate2 = java.io.File(apkPath)
+            val srcFile = if (candidate1.exists()) candidate1 else candidate2
+            val cacheApk = java.io.File(context.cacheDir, "install_${srcFile.name}")
+            if (srcFile.exists()) {
+                srcFile.copyTo(cacheApk, overwrite = true)
+            }
+            val targetFile = if (cacheApk.exists()) cacheApk else srcFile
+            val uri = androidx.core.content.FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                targetFile
+            )
+            val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "application/vnd.android.package-archive")
+                addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+        } catch (e: Exception) {
+            notify(e)
+        }
+    }
+
+    val doExportProject: () -> Unit = {
+        scope.launch {
+            runCatching {
+                val res = api.exportProject(selectedProject, false)
+                val path = res.optString("zip_path")
+                val bytes = res.optLong("size_bytes", 0)
+                val mb = String.format(java.util.Locale.US, "%.1f MB", bytes / (1024.0 * 1024.0))
+                error = "Project exported: $path ($mb)"
+            }.onFailure { notify(it) }
+        }
+    }
+
+    val doViewMemory: () -> Unit = {
+        scope.launch {
+            runCatching {
+                val mem = api.hermesMemory(selectedProject)
+                hermesMemoryData = mem
+                showHermesMemoryDialog = true
+            }.onFailure { notify(it) }
+        }
+    }
 
     LaunchedEffect(Unit) {
         if (!BootstrapManager.isReady(context)) {
@@ -161,12 +219,6 @@ fun TabletAgentApp() {
         if (oauthState.completed && BootstrapManager.isReady(context)) {
             cliAuthStatus = CliAuthManager.getAuthStatus(context)
             keySummary = SecureSecrets.getSummary(context)
-        }
-    }
-
-    val notify: (Throwable) -> Unit = { 
-        if (it !is kotlin.coroutines.cancellation.CancellationException) {
-            error = it.message ?: it.javaClass.simpleName 
         }
     }
 
@@ -210,6 +262,10 @@ fun TabletAgentApp() {
                         }
                     }
                     if (selectedProject.isNotBlank()) {
+                        if (pollTick % 5 == 0) {
+                            runCatching { api.listApks(selectedProject).objects() }
+                                .onSuccess { detectedApks = it }
+                        }
                         val tasksArr = api.tasks(selectedProject)
                         val tasksRaw = tasksArr.toString()
                         if (tasksRaw != lastTasksRaw) {
@@ -333,7 +389,11 @@ fun TabletAgentApp() {
                             tab = nextView
                             if (nextView == 2) sidebarOpen = false
                         },
-                        onOpenGit = { gitReviewDialog = true }
+                        onOpenGit = { gitReviewDialog = true },
+                        apks = detectedApks,
+                        onInstallApk = launchInstallApk,
+                        onExportProject = doExportProject,
+                        onViewMemory = doViewMemory
                     )
                     Column(Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 8.dp)) {
                         if (bootstrapStatus is BootstrapStatus.Extracting) {
@@ -446,7 +506,11 @@ fun TabletAgentApp() {
                                         }.onFailure { notify(it) }
                                     }
                                 },
-                                onCommitClick = { gitReviewDialog = true }
+                                onCommitClick = { gitReviewDialog = true },
+                                apks = detectedApks,
+                                onInstallApk = launchInstallApk,
+                                onExportProject = doExportProject,
+                                onViewMemory = doViewMemory
                             )
                             1 -> BoxWithConstraints(Modifier.fillMaxSize()) {
                                 val density = LocalDensity.current
@@ -511,7 +575,11 @@ fun TabletAgentApp() {
                                                     }.onFailure { notify(it) }
                                                 }
                                             },
-                                            onCommitClick = { gitReviewDialog = true }
+                                            onCommitClick = { gitReviewDialog = true },
+                                            apks = detectedApks,
+                                            onInstallApk = launchInstallApk,
+                                            onExportProject = doExportProject,
+                                            onViewMemory = doViewMemory
                                         )
                                     }
 
@@ -826,6 +894,13 @@ fun TabletAgentApp() {
             onDismiss = { gitReviewDialog = false },
             onCommitted = { error = "Changes committed locally" },
             notify = notify
+        )
+    }
+    if (showHermesMemoryDialog && selectedProject.isNotBlank()) {
+        HermesMemoryDialog(
+            project = selectedProject,
+            memory = hermesMemoryData,
+            onDismiss = { showHermesMemoryDialog = false }
         )
     }
 }

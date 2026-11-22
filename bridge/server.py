@@ -57,6 +57,9 @@ class Handler(BaseHTTPRequestHandler):
             if method=='GET':return self.reply(200,{'projects':self.core.projects()})
             if method=='POST':
                 obj=self._body();return self.reply(201,self.core.create_project(str(obj.get('name','')),str(obj.get('git_url',''))))
+        if seg==['v1','projects','import'] and method=='POST':
+            obj=self._body()
+            return self.reply(201,self.core.import_project(str(obj.get('zip_path','')), str(obj.get('name','')) or None))
         if seg==['v1','agents'] and method=='GET':
             return self.reply(200,{'agents':self.core.available_agents()})
         if seg==['v1','settings']:
@@ -65,7 +68,7 @@ class Handler(BaseHTTPRequestHandler):
         if seg==['v1','tasks']:
             if method=='GET':return self.reply(200,{'tasks':self.core.tasks(q.get('project',[None])[0])})
             if method=='POST':
-                obj=self._body();return self.reply(202,self.core.start_task(str(obj.get('project','')),str(obj.get('prompt','')),str(obj.get('mode','build')),str(obj.get('agent','codex')),str(obj.get('model','')),str(obj.get('task_id','')) or None))
+                obj=self._body();return self.reply(202,self.core.start_task(str(obj.get('project','')),str(obj.get('prompt','')),str(obj.get('mode','build')),str(obj.get('agent','codex')),str(obj.get('model','')),str(obj.get('task_id','')) or None,bool(obj.get('use_worktree',False))))
         if len(seg)>=3 and seg[:2]==['v1','tasks']:
             tid=seg[2]
             if len(seg)==3 and method=='GET':return self.reply(200,self.core.task(tid))
@@ -95,6 +98,16 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply(200,self.core.project_instructions(name))
                 if method=='PUT':
                     return self.reply(200,self.core.save_project_instructions(name,str(self._body().get('content',''))))
+            if len(seg)==4 and seg[3]=='export' and method=='POST':
+                obj=self._body()
+                return self.reply(200,self.core.export_project(name,include_env=bool(obj.get('include_env',False))))
+            if len(seg)==4 and seg[3]=='apks' and method=='GET':
+                return self.reply(200,{'apks':self.core.list_project_apks(name)})
+            if len(seg)==4 and seg[3]=='memory' and method=='GET':
+                try:
+                    return self.reply(200,self.core.read_file(name,'.agents/memory.md'))
+                except Exception:
+                    return self.reply(200,{'path':'.agents/memory.md','content':''})
             if len(seg)==5 and seg[3]=='git':
                 if seg[4]=='status' and method=='GET':
                     return self.reply(200,self.core.git_status(name))

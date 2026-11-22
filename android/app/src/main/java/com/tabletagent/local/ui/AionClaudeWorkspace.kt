@@ -568,7 +568,11 @@ fun ClaudeCodeTopBar(
     bridgePort: Int,
     workspaceView: Int,
     onSelectWorkspaceView: (Int) -> Unit,
-    onOpenGit: () -> Unit
+    onOpenGit: () -> Unit,
+    apks: List<JSONObject> = emptyList(),
+    onInstallApk: (String) -> Unit = {},
+    onExportProject: () -> Unit = {},
+    onViewMemory: () -> Unit = {}
 ) {
     Surface(
         color = MaterialTheme.colorScheme.surface,
@@ -748,6 +752,67 @@ fun ClaudeCodeTopBar(
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
+
+                        // Hermes Episodic Memory Ledger Button
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier
+                                .size(28.dp)
+                                .clip(RoundedCornerShape(7.dp))
+                                .background(MaterialTheme.colorScheme.surfaceVariant)
+                                .clickable { onViewMemory() }
+                        ) {
+                            Icon(
+                                Icons.Default.Psychology,
+                                contentDescription = "Hermes Memory",
+                                modifier = Modifier.size(15.dp),
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        }
+
+                        // Export Project .zip Button
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier
+                                .size(28.dp)
+                                .clip(RoundedCornerShape(7.dp))
+                                .background(MaterialTheme.colorScheme.surfaceVariant)
+                                .clickable { onExportProject() }
+                        ) {
+                            Icon(
+                                Icons.Default.Archive,
+                                contentDescription = "Export .zip",
+                                modifier = Modifier.size(14.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    // 1-Click Install APK button if APK detected in project
+                    if (apks.isNotEmpty()) {
+                        val firstApk = apks.first()
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(7.dp))
+                                .background(MaterialTheme.colorScheme.tertiaryContainer)
+                                .clickable { onInstallApk(firstApk.optString("path")) }
+                                .padding(horizontal = 7.dp, vertical = 5.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.Android,
+                                contentDescription = null,
+                                modifier = Modifier.size(13.dp),
+                                tint = MaterialTheme.colorScheme.tertiary
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                "Install APK",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onTertiaryContainer
+                            )
+                        }
                     }
                 }
             }
@@ -787,7 +852,11 @@ fun AionClaudeAgentPane(
     onCancel: () -> Unit,
     onApprove: (String) -> Unit,
     onDeny: (String) -> Unit,
-    onCommitClick: () -> Unit
+    onCommitClick: () -> Unit,
+    apks: List<JSONObject> = emptyList(),
+    onInstallApk: (String) -> Unit = {},
+    onExportProject: () -> Unit = {},
+    onViewMemory: () -> Unit = {}
 ) {
     val rawAgents = if (agents.isNotEmpty()) agents.map {
         Triple(it.optString("name"), it.optString("display_name"), it.optBoolean("available", true))
@@ -823,6 +892,7 @@ fun AionClaudeAgentPane(
     var showAttachDialog by remember { mutableStateOf(false) }
     var modelMenuExpanded by remember { mutableStateOf(false) }
     var projectMenuExpanded by remember { mutableStateOf(false) }
+    var agentMenuExpanded by remember { mutableStateOf(false) }
 
     if (showAttachDialog) {
         var tempPath by remember { mutableStateOf(attachment) }
@@ -1381,6 +1451,66 @@ fun AionClaudeAgentPane(
 
                 Spacer(Modifier.height(12.dp))
 
+                // Android App Builder & 1-Click APK Installer Ready Card
+                if (apks.isNotEmpty()) {
+                    val firstApk = apks.first()
+                    Surface(
+                        color = MaterialTheme.colorScheme.tertiaryContainer,
+                        shape = RoundedCornerShape(14.dp),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.tertiary.copy(alpha = 0.5f)),
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp)
+                        ) {
+                            Icon(Icons.Default.Android, contentDescription = null, tint = MaterialTheme.colorScheme.tertiary, modifier = Modifier.size(24.dp))
+                            Spacer(Modifier.width(10.dp))
+                            Column(Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        "Android Build Ready: ${firstApk.optString("filename")}",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onTertiaryContainer
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(
+                                        "TEST BUILD",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.tertiary,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(4.dp))
+                                            .background(MaterialTheme.colorScheme.surface)
+                                            .padding(horizontal = 4.dp, vertical = 1.dp)
+                                    )
+                                }
+                                val mb = String.format(java.util.Locale.US, "%.1f MB", firstApk.optLong("size_bytes", 0) / (1024.0 * 1024.0))
+                                Text(
+                                    "${firstApk.optString("path")} · $mb",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.8f),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            Spacer(Modifier.width(10.dp))
+                            Button(
+                                onClick = { onInstallApk(firstApk.optString("path")) },
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.tertiary),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                modifier = Modifier.height(34.dp)
+                            ) {
+                                Icon(Icons.Default.Download, null, modifier = Modifier.size(15.dp))
+                                Spacer(Modifier.width(5.dp))
+                                Text("1-Click Install", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+
                 // AionUI Unified Rounded Composer Card
                 Surface(
                     color = MaterialTheme.colorScheme.surface,
@@ -1483,6 +1613,71 @@ fun AionClaudeAgentPane(
                             }
 
                             Spacer(Modifier.weight(1f))
+
+                            // Aion Mid-Conversation Agent Switcher Dropdown Pill
+                            Box {
+                                Surface(
+                                    onClick = { agentMenuExpanded = true },
+                                    color = MaterialTheme.colorScheme.surfaceVariant,
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp)
+                                    ) {
+                                        Icon(
+                                            Icons.Default.SmartToy,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(13.dp),
+                                            tint = MaterialTheme.colorScheme.primary
+                                        )
+                                        Spacer(Modifier.width(4.dp))
+                                        Text(
+                                            when (selectedAgent) {
+                                                "codex" -> "Codex"
+                                                "claude" -> "Claude"
+                                                "antigravity" -> "Antigravity"
+                                                else -> selectedAgent
+                                            },
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                        Icon(
+                                            Icons.Default.ArrowDropDown,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                    }
+                                }
+                                DropdownMenu(
+                                    expanded = agentMenuExpanded,
+                                    onDismissRequest = { agentMenuExpanded = false }
+                                ) {
+                                    visibleAgents.forEach { (aName, aDisplay, _) ->
+                                        DropdownMenuItem(
+                                            text = {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Text(
+                                                        aDisplay,
+                                                        fontWeight = if (aName == selectedAgent) FontWeight.Bold else FontWeight.Normal
+                                                    )
+                                                    if (aName == selectedAgent) {
+                                                        Spacer(Modifier.width(6.dp))
+                                                        Text("active", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                                                    }
+                                                }
+                                            },
+                                            onClick = {
+                                                onSelectAgent(aName)
+                                                onSelectModel("default")
+                                                agentMenuExpanded = false
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+
+                            Spacer(Modifier.width(6.dp))
 
                             // Model Dropdown Pill
                             Box {
@@ -1909,7 +2104,53 @@ fun AionClaudeAgentPane(
                 }
             }
 
-            // Compact Single-Row Bottom Chat Composer (Plan/Build + Model embedded inside input box, auto-expanding)
+            // Android App Builder Ready Card in active chat thread
+            if (apks.isNotEmpty()) {
+                val firstApk = apks.first()
+                Surface(
+                    color = MaterialTheme.colorScheme.tertiaryContainer,
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.tertiary.copy(alpha = 0.5f)),
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                    ) {
+                        Icon(Icons.Default.Android, contentDescription = null, tint = MaterialTheme.colorScheme.tertiary, modifier = Modifier.size(20.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                "Android Build Ready: ${firstApk.optString("filename")}",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onTertiaryContainer
+                            )
+                            val mb = String.format(java.util.Locale.US, "%.1f MB", firstApk.optLong("size_bytes", 0) / (1024.0 * 1024.0))
+                            Text(
+                                "${firstApk.optString("path")} · $mb",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.8f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        Button(
+                            onClick = { onInstallApk(firstApk.optString("path")) },
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.tertiary),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            modifier = Modifier.height(30.dp)
+                        ) {
+                            Icon(Icons.Default.Download, null, modifier = Modifier.size(13.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("1-Click Install", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+
+            // Compact Single-Row Bottom Chat Composer (Plan/Build + Model + Agent embedded inside input box, auto-expanding)
             Surface(
                 color = MaterialTheme.colorScheme.surface,
                 tonalElevation = 1.dp,
@@ -2005,6 +2246,67 @@ fun AionClaudeAgentPane(
                                         onClick = {
                                             onSelectModel(m)
                                             modelMenuExpanded = false
+                                        }
+                                    )
+                                }
+                            }
+                        }
+
+                        Spacer(Modifier.width(4.dp))
+
+                        // Aion Mid-Conversation Agent Switcher Chip inside chat box
+                        Box {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(50))
+                                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                                    .clickable { agentMenuExpanded = true }
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.SmartToy,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(11.dp),
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                                Spacer(Modifier.width(3.dp))
+                                Text(
+                                    when (selectedAgent) {
+                                        "codex" -> "Codex"
+                                        "claude" -> "Claude"
+                                        "antigravity" -> "Antigravity"
+                                        else -> selectedAgent
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Icon(Icons.Default.ArrowDropDown, null, Modifier.size(13.dp))
+                            }
+                            DropdownMenu(
+                                expanded = agentMenuExpanded,
+                                onDismissRequest = { agentMenuExpanded = false }
+                            ) {
+                                visibleAgents.forEach { (aName, aDisplay, _) ->
+                                    DropdownMenuItem(
+                                        text = {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Text(
+                                                    aDisplay,
+                                                    fontWeight = if (aName == selectedAgent) FontWeight.Bold else FontWeight.Normal
+                                                )
+                                                if (aName == selectedAgent) {
+                                                    Spacer(Modifier.width(6.dp))
+                                                    Text("active", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                                                }
+                                            }
+                                        },
+                                        onClick = {
+                                            onSelectAgent(aName)
+                                            onSelectModel("default")
+                                            agentMenuExpanded = false
                                         }
                                     )
                                 }
@@ -2464,4 +2766,127 @@ private fun LiveStreamingIndicatorPill(
             }
         }
     }
+}
+
+@Composable
+fun HermesMemoryDialog(
+    project: String,
+    memory: JSONObject?,
+    onDismiss: () -> Unit
+) {
+    val provenPatterns = memory?.optJSONArray("proven_patterns")?.let { arr ->
+        (0 until arr.length()).map { arr.getString(it) }
+    } ?: emptyList()
+    val pastFixes = memory?.optJSONArray("past_fixes")?.let { arr ->
+        (0 until arr.length()).map { arr.getString(it) }
+    } ?: emptyList()
+    val knownPitfalls = memory?.optJSONArray("known_pitfalls")?.let { arr ->
+        (0 until arr.length()).map { arr.getString(it) }
+    } ?: emptyList()
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Psychology, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(24.dp))
+                Spacer(Modifier.width(8.dp))
+                Column {
+                    Text("Hermes Episodic Memory Ledger", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Text("$project · .agents/memory.md", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 420.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    "Shared episodic ledger across all agents (Codex, Antigravity, Claude Code). Injected automatically into agent prompt context on every task turn.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                // Section 1: Proven Patterns
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    shape = RoundedCornerShape(10.dp),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(Modifier.padding(10.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.CheckCircle, null, tint = MaterialTheme.colorScheme.tertiary, modifier = Modifier.size(15.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Proven Patterns (${provenPatterns.size})", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        if (provenPatterns.isEmpty()) {
+                            Text("No proven patterns recorded yet.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        } else {
+                            provenPatterns.forEach { p ->
+                                Text("• $p", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 2.dp))
+                            }
+                        }
+                    }
+                }
+
+                // Section 2: Past Fixes
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    shape = RoundedCornerShape(10.dp),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(Modifier.padding(10.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Build, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(15.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Past Fixes (${pastFixes.size})", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        if (pastFixes.isEmpty()) {
+                            Text("No repair fixes recorded yet.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        } else {
+                            pastFixes.forEach { f ->
+                                Text("• $f", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 2.dp))
+                            }
+                        }
+                    }
+                }
+
+                // Section 3: Known Pitfalls
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    shape = RoundedCornerShape(10.dp),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(Modifier.padding(10.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Warning, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(15.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Known Pitfalls (${knownPitfalls.size})", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        if (knownPitfalls.isEmpty()) {
+                            Text("No known pitfalls recorded yet.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        } else {
+                            knownPitfalls.forEach { p ->
+                                Text("• $p", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(vertical = 2.dp))
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close", fontWeight = FontWeight.Bold)
+            }
+        }
+    )
 }

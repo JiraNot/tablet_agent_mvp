@@ -16,6 +16,7 @@ import subprocess
 import threading
 import time
 import uuid
+import zipfile
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from contextlib import contextmanager
@@ -45,6 +46,104 @@ REDACTION = re.compile(
     r'|Bearer\s+[A-Za-z0-9._\-]{12,}'
     r'|(?:OPENAI|ANTHROPIC|GEMINI|GOOGLE|GITHUB|GH|AWS|STRIPE|DATABASE|[A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|API_KEY))[A-Z0-9_]*\s*=\s*["\']?[^\s"\'\n]{4,})'
 )
+
+QUOTA_ERROR_RE = re.compile(
+    r'(?:quota(?: exceeded)?|rate[ -]?limit|429 too many requests|insufficient_quota|credit balance|usage limit)',
+    re.IGNORECASE
+)
+
+class HermesMemoryLedger:
+    @staticmethod
+    def memory_path(project_path: Path) -> Path:
+        agents_dir = project_path / '.agents'
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        return agents_dir / 'memory.md'
+
+    @classmethod
+    def load_memory(cls, project_path: Path) -> dict[str, list[str]]:
+        p = cls.memory_path(project_path)
+        if not p.is_file():
+            return {'proven_patterns': [], 'known_pitfalls': [], 'past_fixes': []}
+        try:
+            content = p.read_text(encoding='utf-8')
+        except OSError:
+            return {'proven_patterns': [], 'known_pitfalls': [], 'past_fixes': []}
+        res: dict[str, list[str]] = {'proven_patterns': [], 'known_pitfalls': [], 'past_fixes': []}
+        current_section = None
+        for line in content.splitlines():
+            line_s = line.strip()
+            if line_s.startswith('## Proven Patterns'):
+                current_section = 'proven_patterns'
+            elif line_s.startswith('## Known Pitfalls'):
+                current_section = 'known_pitfalls'
+            elif line_s.startswith('## Past Fixes'):
+                current_section = 'past_fixes'
+            elif line_s.startswith('## '):
+                current_section = None
+            elif line_s.startswith('- ') and current_section:
+                res[current_section].append(line_s[2:].strip())
+        return res
+
+    @classmethod
+    def save_memory(cls, project_path: Path, data: dict[str, list[str]]):
+        p = cls.memory_path(project_path)
+        lines = ['# Hermes Memory Ledger\n']
+        lines.append('## Proven Patterns')
+        for item in data.get('proven_patterns', [])[-15:]:
+            lines.append(f'- {item}')
+        lines.append('\n## Known Pitfalls')
+        for item in data.get('known_pitfalls', [])[-15:]:
+            lines.append(f'- {item}')
+        lines.append('\n## Past Fixes')
+        for item in data.get('past_fixes', [])[-15:]:
+            lines.append(f'- {item}')
+        lines.append('')
+        p.write_text('\n'.join(lines), encoding='utf-8')
+
+    @classmethod
+    def record_success(cls, project_path: Path, note: str):
+        clean = note.strip()
+        if not clean:
+            return
+        data = cls.load_memory(project_path)
+        if clean not in data['proven_patterns']:
+            data['proven_patterns'].append(clean)
+            cls.save_memory(project_path, data)
+
+    @classmethod
+    def record_fix(cls, project_path: Path, error_summary: str, fix_summary: str):
+        clean_err = error_summary.strip().replace('\n', ' ')[:140]
+        clean_fix = fix_summary.strip().replace('\n', ' ')[:160]
+        entry = f"**Error:** `{clean_err}` ➔ **Fix:** `{clean_fix}`"
+        data = cls.load_memory(project_path)
+        if entry not in data['past_fixes']:
+            data['past_fixes'].append(entry)
+            cls.save_memory(project_path, data)
+
+    @classmethod
+    def record_pitfall(cls, project_path: Path, pitfall: str):
+        clean = pitfall.strip().replace('\n', ' ')[:180]
+        if not clean:
+            return
+        data = cls.load_memory(project_path)
+        if clean not in data['known_pitfalls']:
+            data['known_pitfalls'].append(clean)
+            cls.save_memory(project_path, data)
+
+    @classmethod
+    def build_context(cls, project_path: Path, max_chars: int = 1200) -> str:
+        data = cls.load_memory(project_path)
+        parts = []
+        if data['proven_patterns']:
+            parts.append('Proven Patterns: ' + '; '.join(data['proven_patterns'][-4:]))
+        if data['past_fixes']:
+            parts.append('Past Fixes: ' + '; '.join(data['past_fixes'][-3:]))
+        if data['known_pitfalls']:
+            parts.append('Known Pitfalls: ' + '; '.join(data['known_pitfalls'][-3:]))
+        if not parts:
+            return ''
+        joined = '\n'.join(parts)
+        return f'\n\nHermes Memory Ledger (.agents/memory.md):\n{joined[:max_chars]}'
 
 class BridgeError(Exception):
     def __init__(self, message: str, status: int = 400):
@@ -370,6 +469,8 @@ class LocalCore:
         self.thread_candidates: dict[str, str] = {}
         self.previews: dict[str, dict[str, Any]] = {}
         self.approval_events: dict[str, threading.Event] = {}
+        self.task_queues: dict[str, list[dict[str, Any]]] = {}
+        self.active_worktrees: dict[str, Path] = {}
         self.adapters: dict[str, BaseAgentAdapter] = {
             'codex': CodexAdapter(),
             'claude': ClaudeCodeAdapter(),
@@ -752,7 +853,166 @@ class LocalCore:
         except Exception as e:
             raise BridgeError(f'Git rollback error: {e}')
 
-    def start_task(self, project: str, prompt: str, mode: str = 'build', agent: str = 'codex', model: str = '', task_id: str | None = None) -> dict[str, Any]:
+    def create_worktree(self, project: str, task_id: str) -> Path:
+        base = self._project(project)
+        git_cmd = shutil.which('git') or 'git'
+        if not (base / '.git').exists():
+            raise BridgeError('Git repository required for worktree isolation')
+        wt_root = base / '.worktrees'
+        wt_root.mkdir(parents=True, exist_ok=True)
+        wt_dir = wt_root / f'task-{task_id[:8]}'
+        if wt_dir.exists():
+            shutil.rmtree(wt_dir, ignore_errors=True)
+        branch = f'agent/task-{task_id[:8]}'
+        subprocess.run([git_cmd, 'branch', '-D', branch], cwd=base, capture_output=True, timeout=10)
+        res = subprocess.run([git_cmd, 'worktree', 'add', '-b', branch, str(wt_dir)], cwd=base, capture_output=True, text=True, timeout=20)
+        if res.returncode != 0:
+            raise BridgeError(f'Failed to create worktree: {res.stderr.strip() or res.stdout.strip()}')
+        with self.lock:
+            self.active_worktrees[task_id] = wt_dir
+        return wt_dir
+
+    def cleanup_worktree(self, project: str, task_id: str):
+        with self.lock:
+            wt_dir = self.active_worktrees.pop(task_id, None)
+        if not wt_dir or not wt_dir.exists():
+            return
+        try:
+            base = self._project(project)
+            git_cmd = shutil.which('git') or 'git'
+            subprocess.run([git_cmd, 'worktree', 'remove', '--force', str(wt_dir)], cwd=base, capture_output=True, timeout=15)
+            shutil.rmtree(wt_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+    def _dispatch_next_queued_task(self, project: str):
+        next_task = None
+        with self.lock:
+            q = self.task_queues.get(project)
+            if not q:
+                return
+            with self._db() as db:
+                busy = db.execute("SELECT id FROM tasks WHERE project=? AND status IN ('PLANNING','WAITING_APPROVAL','EXECUTING','VERIFYING','REPAIRING') LIMIT 1", (project,)).fetchone()
+                if busy:
+                    return
+            next_task = q.pop(0)
+            if not q:
+                self.task_queues.pop(project, None)
+        if next_task:
+            next_tid = next_task['task_id']
+            threading.Thread(
+                target=self._worker,
+                args=(next_tid, next_task.get('model', ''), next_task.get('turn_prompt')),
+                daemon=True,
+                name=f'task-{next_tid[:8]}'
+            ).start()
+
+    def export_project(self, project: str, export_dir: Path | None = None, include_env: bool = False) -> dict[str, Any]:
+        base = self._project(project)
+        out_dir = Path(export_dir) if export_dir else (self.home / 'downloads')
+        out_dir.mkdir(parents=True, exist_ok=True)
+        ts = time.strftime('%Y%m%d_%H%M%S')
+        zip_name = f'{project}_{ts}.zip'
+        zip_path = out_dir / zip_name
+
+        with self._db() as db:
+            tasks_rows = [dict(r) for r in db.execute('SELECT * FROM tasks WHERE project=?', (project,)).fetchall()]
+            tids = [r['id'] for r in tasks_rows]
+            events_rows = []
+            if tids:
+                qmarks = ','.join('?' for _ in tids)
+                events_rows = [dict(r) for r in db.execute(f'SELECT * FROM events WHERE task_id IN ({qmarks}) ORDER BY seq ASC', tids).fetchall()]
+        project_state = {
+            'project': project,
+            'exported_at': time.time(),
+            'tasks': tasks_rows,
+            'events': events_rows,
+        }
+
+        forbidden_dirs = {'.next', 'node_modules', '.gradle', '.venv', '__pycache__', '.worktrees'}
+        with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr('project_state.json', json.dumps(project_state, indent=2, ensure_ascii=False))
+            for root, dirs, files in os.walk(base):
+                dirs[:] = [d for d in dirs if d not in forbidden_dirs]
+                for file in files:
+                    if file == '.env' and not include_env:
+                        continue
+                    file_path = Path(root) / file
+                    rel = file_path.relative_to(base)
+                    zf.write(file_path, arcname=str(rel))
+
+        return {
+            'project': project,
+            'filename': zip_name,
+            'path': str(zip_path),
+            'size_bytes': zip_path.stat().st_size,
+        }
+
+    def import_project(self, zip_path: Path | str, target_name: str | None = None) -> dict[str, Any]:
+        zp = Path(zip_path).expanduser().resolve()
+        if not zp.is_file():
+            raise BridgeError('Zip file not found', 404)
+        if not zipfile.is_zipfile(zp):
+            raise BridgeError('File is not a valid zip archive')
+        p_name = target_name or zp.stem.split('_')[0]
+        if not NAME_RE.fullmatch(p_name):
+            p_name = 'imported_app'
+        dest = self.workspaces / p_name
+        if dest.exists():
+            raise BridgeError(f'Project "{p_name}" already exists', 409)
+        dest.mkdir(parents=True, exist_ok=True)
+        file_count = 0
+        state_data = None
+        with zipfile.ZipFile(zp, 'r') as zf:
+            for member in zf.infolist():
+                if member.filename.startswith('/') or '..' in member.filename:
+                    continue
+                if member.filename == 'project_state.json':
+                    try:
+                        state_data = json.loads(zf.read(member.filename))
+                    except Exception:
+                        pass
+                    continue
+                zf.extract(member, dest)
+                file_count += 1
+
+        if state_data and isinstance(state_data, dict):
+            with self._db() as db:
+                for t in state_data.get('tasks', []):
+                    db.execute(
+                        'INSERT OR REPLACE INTO tasks(id, project, prompt, agent, mode, status, created_at, updated_at, error, result, verification) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                        (t.get('id'), p_name, t.get('prompt',''), t.get('agent','codex'), t.get('mode','build'), t.get('status','COMPLETED'), t.get('created_at', time.time()), t.get('updated_at', time.time()), t.get('error',''), t.get('result',''), t.get('verification',''))
+                    )
+                for ev in state_data.get('events', []):
+                    db.execute(
+                        'INSERT OR IGNORE INTO events(task_id, timestamp, kind, message) VALUES(?,?,?,?)',
+                        (ev.get('task_id'), ev.get('timestamp') or ev.get('created_at', time.time()), ev.get('kind','log'), ev.get('message',''))
+                    )
+
+        return {'name': p_name, 'files_count': file_count, 'has_git': (dest / '.git').exists()}
+
+    def list_project_apks(self, project: str) -> list[dict[str, Any]]:
+        base = self._project(project)
+        apks = []
+        for root, dirs, files in os.walk(base):
+            if any(p in root for p in ('node_modules', '.next', '.gradle', '.worktrees')):
+                continue
+            for f in files:
+                if f.endswith('.apk'):
+                    fp = Path(root) / f
+                    try:
+                        st = fp.stat()
+                        apks.append({
+                            'name': f,
+                            'path': str(fp.relative_to(base)),
+                            'size_bytes': st.st_size,
+                            'updated_at': st.st_mtime,
+                        })
+                    except OSError:
+                        pass
+        return apks
+
+    def start_task(self, project: str, prompt: str, mode: str = 'build', agent: str = 'codex', model: str = '', task_id: str | None = None, use_worktree: bool = False) -> dict[str, Any]:
         self._project(project)
         if mode not in ALLOWED_MODES:
             raise BridgeError('Mode must be plan or build')
@@ -768,29 +1028,68 @@ class LocalCore:
         now = time.time()
         clean_tid = (task_id or '').strip()
         is_followup = False
+        turn_prompt_to_use = prompt
+        queued_task = False
         with self.lock:
             with self._db() as db:
-                busy = db.execute("SELECT id FROM tasks WHERE project=? AND status IN ('QUEUED','PLANNING','WAITING_APPROVAL','EXECUTING','VERIFYING','REPAIRING') LIMIT 1", (project,)).fetchone()
-                if busy:
-                    raise BridgeError('Another task is active in this project; finish or cancel it first', 409)
-                if clean_tid:
-                    existing = db.execute('SELECT * FROM tasks WHERE id=? AND project=?', (clean_tid, project)).fetchone()
-                    if existing:
-                        is_followup = True
-                        db.execute(
-                            'UPDATE tasks SET agent=?, mode=?, status=?, updated_at=?, error=? WHERE id=?',
-                            (agent, mode, 'QUEUED', now, '', clean_tid)
-                        )
+                busy = db.execute("SELECT id FROM tasks WHERE project=? AND status IN ('PLANNING','WAITING_APPROVAL','EXECUTING','VERIFYING','REPAIRING') LIMIT 1", (project,)).fetchone()
+                if busy and not clean_tid:
+                    if use_worktree and shutil.which('git'):
+                        clean_tid = str(uuid.uuid4())
+                        self.create_worktree(project, clean_tid)
                     else:
                         clean_tid = str(uuid.uuid4())
                         db.execute('INSERT INTO tasks(id,project,prompt,agent,mode,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)', (clean_tid,project,prompt,agent,mode,'QUEUED',now,now))
-                else:
-                    clean_tid = str(uuid.uuid4())
-                    db.execute('INSERT INTO tasks(id,project,prompt,agent,mode,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)', (clean_tid,project,prompt,agent,mode,'QUEUED',now,now))
+                        queued_task = True
+                        self.task_queues.setdefault(project, []).append({'task_id': clean_tid, 'model': model, 'turn_prompt': prompt})
+                elif busy and clean_tid:
+                    raise BridgeError('Another turn is currently running in this project; wait or cancel first', 409)
+
+                if not queued_task:
+                    if clean_tid:
+                        existing = db.execute('SELECT * FROM tasks WHERE id=? AND project=?', (clean_tid, project)).fetchone()
+                        if existing:
+                            is_followup = True
+                            prev_agent = existing['agent']
+                            if prev_agent != agent:
+                                last_msg = ""
+                                r_msg = db.execute("SELECT message FROM events WHERE task_id=? AND kind='message' ORDER BY seq DESC LIMIT 1", (clean_tid,)).fetchone()
+                                if r_msg and r_msg['message']:
+                                    last_msg = str(r_msg['message'])[:800]
+                                try:
+                                    git_stat = self.git_status(project)
+                                    stat_summary = f"{len(git_stat.get('staged', []))} staged, {len(git_stat.get('unstaged', []))} modified, {len(git_stat.get('untracked', []))} untracked"
+                                except Exception:
+                                    stat_summary = 'git status unavailable'
+                                memory_ctx = HermesMemoryLedger.build_context(self._project(project))
+                                turn_prompt_to_use = (
+                                    f"[Aion Cross-Agent Handoff: Switched agent from {prev_agent} to {agent}]\n"
+                                    f"Previous Context: {last_msg}\n"
+                                    f"Workspace Status: {stat_summary}\n"
+                                    f"{memory_ctx}\n\n"
+                                    f"User follow-up:\n{prompt}"
+                                )
+                                self.append(clean_tid, 'log', f"Aion Handoff: Switched agent from {prev_agent} to {agent} with synthesized session context.")
+                            db.execute(
+                                'UPDATE tasks SET agent=?, mode=?, status=?, updated_at=?, error=? WHERE id=?',
+                                (agent, mode, 'QUEUED', now, '', clean_tid)
+                            )
+                        else:
+                            clean_tid = str(uuid.uuid4())
+                            db.execute('INSERT INTO tasks(id,project,prompt,agent,mode,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)', (clean_tid,project,prompt,agent,mode,'QUEUED',now,now))
+                    else:
+                        clean_tid = str(uuid.uuid4())
+                        db.execute('INSERT INTO tasks(id,project,prompt,agent,mode,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)', (clean_tid,project,prompt,agent,mode,'QUEUED',now,now))
+
+        if queued_task:
+            self.append(clean_tid, 'status', 'QUEUED')
+            self.append(clean_tid, 'log', 'Task placed in project FIFO queue (waiting for active task to complete)')
+            return self.task(clean_tid)
+
         if is_followup:
             self.append(clean_tid, 'user', prompt)
         self.append(clean_tid, 'status', 'QUEUED')
-        threading.Thread(target=self._worker, args=(clean_tid, model, prompt), daemon=True, name=f'task-{clean_tid[:8]}').start()
+        threading.Thread(target=self._worker, args=(clean_tid, model, turn_prompt_to_use), daemon=True, name=f'task-{clean_tid[:8]}').start()
         return self.task(clean_tid)
 
     def _run(self, task_id: str, cmd: list[str], cwd: Path, timeout: float, phase: str) -> tuple[int,str]:
@@ -1304,39 +1603,44 @@ class LocalCore:
             db.execute('INSERT INTO agent_threads(project,agent,session_id,updated_at) VALUES(?,?,?,?) ON CONFLICT(project) DO UPDATE SET session_id=excluded.session_id, updated_at=excluded.updated_at', (project,agent,thread_id,time.time()))
 
     def _worker(self, task_id: str, model: str = '', turn_prompt: str | None = None):
-        rec=self.task(task_id); project_path=self._project(rec['project'])
+        rec=self.task(task_id)
+        project_name = rec['project']
+        with self.lock:
+            project_path = self.active_worktrees.get(task_id) or self._project(project_name)
         if self.task(task_id)['status']=='CANCELLED': return
-        agent_name = rec['agent']
-        adapter = self.adapters.get(agent_name)
-        if not adapter or not adapter.is_available():
-            self.set_status(task_id,'BLOCKED_SETUP', error=f'{adapter.display_name if adapter else agent_name} CLI not found in runtime PATH'); return
-        mode=rec['mode']
-        self.set_status(task_id, 'PLANNING' if mode=='plan' else 'EXECUTING')
-        policy = ('Plan only. Do not edit files or run mutating commands. Provide concise steps and test strategy.'
-                  if mode=='plan' else
-                  'You may edit files under the current workspace. Keep changes scoped; run relevant tests. Never read or disclose .env files, keys, or credentials. Do not git push or deploy. Explain what changed and tests actually executed.')
-        instructions = ''
-        for ins_name in ['AGENTS.md', 'CLAUDE.md', '.agents.md']:
-            ins_p = project_path / ins_name
-            if ins_p.is_file():
-                try:
-                    raw_ins = ins_p.read_text(encoding='utf-8')[:4000]
-                    clean_ins = REDACTION.sub('[REDACTED]', raw_ins)
-                    instructions = f'\n\nProject Instructions ({ins_name}):\n{clean_ins}'
-                    break
-                except Exception:
-                    pass
-        thread = self._thread_for_project(rec['project'], agent_name)
-        effective_prompt = turn_prompt if (turn_prompt and turn_prompt.strip()) else rec['prompt']
-        prompt_text = f'{policy}{instructions}\n\nUser task:\n{effective_prompt}'
-        settings = self.get_settings()
-        sandbox_override = 'danger-full-access' if (agent_name == 'codex' and mode == 'build' and settings.get('codex_proot_sandbox_bypass')) else None
-        use_app_server = bool(agent_name == 'codex' and isinstance(adapter, CodexAdapter) and settings.get('codex_use_app_server'))
-        if sandbox_override:
-            cmd = adapter.build_cmd(project_path, prompt_text, mode, thread, model, sandbox_override=sandbox_override)
-        else:
-            cmd = adapter.build_cmd(project_path, prompt_text, mode, thread, model)
         try:
+            agent_name = rec['agent']
+            adapter = self.adapters.get(agent_name)
+            if not adapter or not adapter.is_available():
+                self.set_status(task_id,'BLOCKED_SETUP', error=f'{adapter.display_name if adapter else agent_name} CLI not found in runtime PATH'); return
+            mode=rec['mode']
+            self.set_status(task_id, 'PLANNING' if mode=='plan' else 'EXECUTING')
+            policy = ('Plan only. Do not edit files or run mutating commands. Provide concise steps and test strategy.'
+                      if mode=='plan' else
+                      'You may edit files under the current workspace. Keep changes scoped; run relevant tests. Never read or disclose .env files, keys, or credentials. Do not git push or deploy. Explain what changed and tests actually executed.')
+            instructions = ''
+            for ins_name in ['AGENTS.md', 'CLAUDE.md', '.agents.md']:
+                ins_p = project_path / ins_name
+                if ins_p.is_file():
+                    try:
+                        raw_ins = ins_p.read_text(encoding='utf-8')[:4000]
+                        clean_ins = REDACTION.sub('[REDACTED]', raw_ins)
+                        instructions = f'\n\nProject Instructions ({ins_name}):\n{clean_ins}'
+                        break
+                    except Exception:
+                        pass
+            memory_ctx = HermesMemoryLedger.build_context(project_path)
+            thread = self._thread_for_project(project_name, agent_name)
+            effective_prompt = turn_prompt if (turn_prompt and turn_prompt.strip()) else rec['prompt']
+            prompt_text = f'{policy}{instructions}{memory_ctx}\n\nUser task:\n{effective_prompt}'
+            settings = self.get_settings()
+            sandbox_override = 'danger-full-access' if (agent_name == 'codex' and mode == 'build' and settings.get('codex_proot_sandbox_bypass')) else None
+            use_app_server = bool(agent_name == 'codex' and isinstance(adapter, CodexAdapter) and settings.get('codex_use_app_server'))
+            if sandbox_override:
+                cmd = adapter.build_cmd(project_path, prompt_text, mode, thread, model, sandbox_override=sandbox_override)
+            else:
+                cmd = adapter.build_cmd(project_path, prompt_text, mode, thread, model)
+
             if use_app_server and isinstance(adapter, CodexAdapter):
                 rc, output = self._run_codex_app_server(
                     task_id, adapter, project_path, prompt_text, mode, thread, model, sandbox_override=sandbox_override, timeout=1800
@@ -1344,11 +1648,38 @@ class LocalCore:
             else:
                 rc, output=self._run(task_id,cmd,project_path,timeout=1800,phase='agent')
             if self.task(task_id)['status']=='CANCELLED': return
+
+            # Aion Orchestrator: Auto-Quota Failover
+            if rc != 0 and QUOTA_ERROR_RE.search(output):
+                fallback = None
+                for cand_name in ['codex', 'antigravity', 'claude', 'opencode']:
+                    cand = self.adapters.get(cand_name)
+                    if cand and cand.name != agent_name and cand.is_available():
+                        fallback = cand
+                        break
+                if fallback:
+                    self.append(task_id, 'log', f"⚠ {adapter.display_name} quota exceeded. Aion Auto-Failover: switching to {fallback.display_name}...")
+                    with self._db() as db:
+                        db.execute('UPDATE tasks SET agent=? WHERE id=?', (fallback.name, task_id))
+                    agent_name = fallback.name
+                    adapter = fallback
+                    fb_thread = self._thread_for_project(project_name, agent_name)
+                    fb_prompt = f"[Aion Quota Failover from {rec['agent']} to {agent_name}]\n{prompt_text}"
+                    use_fb_app_server = bool(agent_name == 'codex' and isinstance(adapter, CodexAdapter) and settings.get('codex_use_app_server'))
+                    if use_fb_app_server and isinstance(adapter, CodexAdapter):
+                        rc, output = self._run_codex_app_server(
+                            task_id, adapter, project_path, fb_prompt, mode, fb_thread, model, sandbox_override=sandbox_override, timeout=1800
+                        )
+                    else:
+                        fb_cmd = adapter.build_cmd(project_path, fb_prompt, mode, fb_thread, model)
+                        rc, output = self._run(task_id, fb_cmd, project_path, timeout=1800, phase='agent')
+                    if self.task(task_id)['status']=='CANCELLED': return
+
             if agent_name == 'codex' and mode == 'build' and 'cannot establish app-server socket mount isolation' in output:
                 self.append(task_id, 'error', 'Codex Linux sandbox is blocked in Android PRoot. Enable the opt-in Codex PRoot Build toggle in Settings -> Security to allow workspace writes.')
             if rc!=0:
                 self.set_status(task_id,'FAILED',error=f'{adapter.display_name} exited with status {rc}',result=output);return
-            self._remember_thread(rec['project'],task_id, agent_name)
+            self._remember_thread(project_name,task_id, agent_name)
             if mode=='plan':
                 self.set_status(task_id,'PLANNED',result=output);return
             self.set_status(task_id,'VERIFYING',result=output)
@@ -1378,19 +1709,21 @@ class LocalCore:
                 rc, verify_output=self._run(task_id, command, project_path, timeout=300, phase='verify')
                 if self.task(task_id)['status']=='CANCELLED':return
                 if rc==0:
+                    HermesMemoryLedger.record_success(project_path, f"Verified: {' '.join(command)}")
                     self.set_status(task_id,'COMPLETED',verification='Verified: '+ ' '.join(command)+'\n'+verify_output[-2000:]);return
                 if attempt==1:
+                    HermesMemoryLedger.record_pitfall(project_path, f"{' '.join(command)} failed: {verify_output[:120]}")
                     self.append(task_id, 'verification', f'VERIFICATION_FAILED: {" ".join(command)} exited with code {rc} after repair attempt.')
                     self.set_status(task_id,'FAILED',error=f'VERIFICATION_FAILED: Build verification failed after repair (exit {rc})',verification=verify_output);return
-                chk_sha = self.create_git_checkpoint(rec['project'], f'task-{task_id[:8]}-pre-repair')
+                chk_sha = self.create_git_checkpoint(project_name, f'task-{task_id[:8]}-pre-repair')
                 if chk_sha:
                     self.append(task_id, 'log', f'Created pre-repair Git checkpoint {chk_sha[:8]} (rollback available)')
                 self.set_status(task_id,'REPAIRING',verification=verify_output)
-                fix_prompt=(f'Your previous task for project {rec["project"]} was not verified.\n'
+                fix_prompt=(f'Your previous task for project {project_name} was not verified.\n'
                             f'Command: {" ".join(command)}\nExit code: {rc}\nError log:\n{REDACTION.sub("[REDACTED]",verify_output)[-2400:]}\n'
                             'Fix these errors within the workspace, rerun your own checks, and report changes. '
                             'Do not access credentials or deploy.')
-                fix_thread = self._thread_for_project(rec['project'], agent_name)
+                fix_thread = self._thread_for_project(project_name, agent_name)
                 if use_app_server and isinstance(adapter, CodexAdapter):
                     rc, repair_output = self._run_codex_app_server(
                         task_id, adapter, project_path, fix_prompt, 'build', fix_thread, model, sandbox_override=sandbox_override, timeout=1200
@@ -1400,13 +1733,21 @@ class LocalCore:
                     rc,repair_output=self._run(task_id,fix_cmd,project_path,timeout=1200,phase='agent')
                 if self.task(task_id)['status']=='CANCELLED':return
                 if rc:
+                    HermesMemoryLedger.record_pitfall(project_path, f"Repair failed on {' '.join(command)}: {verify_output[:120]}")
                     self.set_status(task_id,'FAILED',error='Agent repair attempt failed',verification=verify_output,result=repair_output);return
-                self._remember_thread(rec['project'],task_id, agent_name)
+                HermesMemoryLedger.record_fix(project_path, verify_output, repair_output)
+                self._remember_thread(project_name,task_id, agent_name)
                 self.set_status(task_id,'VERIFYING')
         except Exception as exc:
             try:
                 if self.task(task_id)['status']!='CANCELLED':
                     self.set_status(task_id,'FAILED',error=f'{type(exc).__name__}: {exc}'[:1000])
+            except Exception:
+                pass
+        finally:
+            try:
+                self.cleanup_worktree(project_name, task_id)
+                self._dispatch_next_queued_task(project_name)
             except Exception:
                 pass
 

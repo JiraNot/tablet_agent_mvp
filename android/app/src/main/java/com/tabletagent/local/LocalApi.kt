@@ -55,8 +55,8 @@ class LocalApi(private val deviceToken: String, port: Int = 8765) {
         JSONObject().put("name", name).put("git_url", url))
     suspend fun tasks(project: String): JSONArray = request("GET", "/v1/tasks?project=${encode(project)}").getJSONArray("tasks")
     suspend fun agents(): JSONArray = request("GET", "/v1/agents").getJSONArray("agents")
-    suspend fun startTask(project: String, prompt: String, mode: String, agent: String = "codex", model: String = "", taskId: String = ""): JSONObject = request("POST", "/v1/tasks",
-        JSONObject().put("project", project).put("prompt", prompt).put("mode", mode).put("agent", agent).put("model", model).put("task_id", taskId))
+    suspend fun startTask(project: String, prompt: String, mode: String, agent: String = "codex", model: String = "", taskId: String = "", useWorktree: Boolean = false): JSONObject = request("POST", "/v1/tasks",
+        JSONObject().put("project", project).put("prompt", prompt).put("mode", mode).put("agent", agent).put("model", model).put("task_id", taskId).put("use_worktree", useWorktree))
     suspend fun eventsPage(taskId: String, after: Int): JSONObject = request("GET", "/v1/tasks/${encode(taskId)}/events?after=$after")
     suspend fun events(taskId: String, after: Int): JSONArray = eventsPage(taskId, after).getJSONArray("events")
     suspend fun settings(): JSONObject = request("GET", "/v1/settings")
@@ -79,4 +79,8 @@ class LocalApi(private val deviceToken: String, port: Int = 8765) {
     suspend fun previewStatus(project: String): JSONObject = request("GET", "/v1/projects/${encode(project)}/preview")
     suspend fun previewStart(project: String): JSONObject = request("POST", "/v1/projects/${encode(project)}/preview/start", JSONObject())
     suspend fun previewStop(project: String): JSONObject = request("POST", "/v1/projects/${encode(project)}/preview/stop", JSONObject())
+    suspend fun exportProject(project: String, includeEnv: Boolean = false): JSONObject = request("POST", "/v1/projects/${encode(project)}/export", JSONObject().put("include_env", includeEnv))
+    suspend fun importProject(zipPath: String, name: String = ""): JSONObject = request("POST", "/v1/projects/import", JSONObject().put("zip_path", zipPath).put("name", name))
+    suspend fun listApks(project: String): JSONArray = request("GET", "/v1/projects/${encode(project)}/apks").optJSONArray("apks") ?: JSONArray()
+    suspend fun hermesMemory(project: String): JSONObject = request("GET", "/v1/projects/${encode(project)}/memory")
 }
