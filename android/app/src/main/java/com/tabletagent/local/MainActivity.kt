@@ -41,7 +41,20 @@ class MainActivity : ComponentActivity() {
                 requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 101)
             }
         }
+        val initToken = intent?.getStringExtra("SET_TOKEN")?.trim()
+        if (!initToken.isNullOrBlank()) {
+            SecureDeviceToken.save(this, initToken)
+        }
         setContent { MaterialTheme(colorScheme = lightColorScheme()) { TabletAgentApp() } }
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        val t = intent.getStringExtra("SET_TOKEN")?.trim()
+        if (!t.isNullOrBlank()) {
+            SecureDeviceToken.save(this, t)
+            recreate()
+        }
     }
 }
 
