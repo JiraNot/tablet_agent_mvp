@@ -103,6 +103,10 @@ class Handler(BaseHTTPRequestHandler):
                 if seg[4]=='commit' and method=='POST':
                     obj=self._body()
                     return self.reply(200,self.core.git_commit(name,str(obj.get('message',''))))
+                if seg[4]=='rollback' and method=='POST':
+                    obj=self._body()
+                    target_sha=obj.get('sha')
+                    return self.reply(200,self.core.git_rollback(name,str(target_sha) if target_sha else None))
             if len(seg)>=4 and seg[3]=='preview':
                 if len(seg)==4 and method=='GET':return self.reply(200,self.core.preview(name))
                 if len(seg)==5 and seg[4]=='start' and method=='POST':

@@ -16,6 +16,7 @@ import subprocess
 import threading
 import time
 import uuid
+from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from contextlib import contextmanager
 from typing import Any
@@ -27,6 +28,16 @@ MAX_LOG_CHARS = 6000
 MAX_FILE_BYTES = 256 * 1024
 MAX_EVENTS_PER_TASK = 2500
 NAME_RE = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9._-]{0,69}$')
+DESTRUCTIVE_CMD_RE = re.compile(
+    r'(\brm\s+-[a-zA-Z]*[rf][a-zA-Z]*\b'
+    r'|\bgit\s+reset\s+--hard\b'
+    r'|\bgit\s+clean\s+-[a-zA-Z]*f[a-zA-Z]*\b'
+    r'|\bgit\s+push\b'
+    r'|\bdrop\s+(?:table|database)\b'
+    r'|\bmkfs\b'
+    r'|\bdd\s+if=)',
+    re.IGNORECASE
+)
 REDACTION = re.compile(
     r'(sk-(?:ant-|proj-)?[A-Za-z0-9_\-]{12,}'
     r'|gh[pousr]_[A-Za-z0-9]{16,}'
@@ -40,6 +51,60 @@ class BridgeError(Exception):
         self.status = status
         super().__init__(message)
 
+@dataclass(frozen=True)
+class AgentCapabilities:
+    name: str
+    display_name: str
+    binary: str
+    can_plan: bool
+    can_build: bool
+    supports_resume: bool
+    models: list[str] = field(default_factory=list)
+    permission_scopes: list[str] = field(default_factory=lambda: ['plan-only', 'workspace-write', 'confirm-destructive'])
+
+    def to_dict(self, available: bool = True) -> dict[str, Any]:
+        d = asdict(self)
+        d['available'] = available
+        return d
+
+@dataclass(frozen=True)
+class ResumeHandle:
+    project: str
+    agent: str
+    session_id: str
+
+@dataclass(frozen=True)
+class AgentRun:
+    task_id: str
+    project: str
+    agent: str
+    mode: str
+    permission_scope: str
+    model: str = ''
+    resume: ResumeHandle | None = None
+
+@dataclass(frozen=True)
+class AgentEvent:
+    kind: str
+    message: str
+    session_id: str = ''
+    action_type: str = ''
+    target: str = ''
+
+@dataclass(frozen=True)
+class AgentApproval:
+    id: str
+    task_id: str
+    type: str
+    target: str
+    status: str = 'PENDING'
+
+@dataclass(frozen=True)
+class AgentError:
+    code: str
+    message: str
+    recoverable: bool = False
+
 class BaseAgentAdapter:
     def __init__(self, name: str, display_name: str, binary: str, can_plan: bool, can_build: bool, supports_resume: bool, models: list[str]):
         self.name = name
@@ -49,6 +114,20 @@ class BaseAgentAdapter:
         self.can_build = can_build
         self.supports_resume = supports_resume
         self.models = models
+
+    def capabilities(self) -> AgentCapabilities:
+        return AgentCapabilities(
+            name=self.name,
+            display_name=self.display_name,
+            binary=self.binary,
+            can_plan=self.can_plan,
+            can_build=self.can_build,
+            supports_resume=self.supports_resume,
+            models=list(self.models),
+        )
+
+    def permission_scope_for_mode(self, mode: str) -> str:
+        return 'plan-only' if mode == 'plan' else 'workspace-write'
 
     def _resolve_binary(self, project_path: Path | None = None) -> list[str]:
         if shutil.which(self.binary):
@@ -542,16 +621,50 @@ class LocalCore:
         return self.events_page(task_id, after_seq)['events']
 
     def available_agents(self) -> list[dict[str, Any]]:
-        return [{
-            'name': a.name,
-            'display_name': a.display_name,
-            'binary': a.binary,
-            'available': a.is_available(),
-            'can_plan': a.can_plan,
-            'can_build': a.can_build,
-            'supports_resume': a.supports_resume,
-            'models': a.models
-        } for a in self.adapters.values()]
+        return [a.capabilities().to_dict(available=a.is_available()) for a in self.adapters.values()]
+
+    @staticmethod
+    def is_destructive_command(target: str) -> bool:
+        return bool(DESTRUCTIVE_CMD_RE.search(target or ''))
+
+    def create_git_checkpoint(self, project: str, label: str = 'pre-repair') -> str | None:
+        base = self._project(project)
+        git_cmd = shutil.which('git') or 'git'
+        if not (base / '.git').exists():
+            return None
+        try:
+            subprocess.run([git_cmd, 'add', '-A'], cwd=base, capture_output=True, text=True, timeout=15)
+            st = subprocess.run([git_cmd, 'status', '--porcelain'], cwd=base, capture_output=True, text=True, timeout=10)
+            if st.returncode == 0 and st.stdout.strip():
+                subprocess.run(
+                    [git_cmd, '-c', 'user.name=TabletAgent', '-c', 'user.email=agent@localhost', 'commit', '-m', f'checkpoint({label}): automated snapshot before repair'],
+                    cwd=base, capture_output=True, text=True, timeout=15
+                )
+            rev = subprocess.run([git_cmd, 'rev-parse', 'HEAD'], cwd=base, capture_output=True, text=True, timeout=10)
+            return rev.stdout.strip() if rev.returncode == 0 and rev.stdout.strip() else None
+        except Exception:
+            return None
+
+    def git_rollback(self, project: str, target_sha: str | None = None) -> dict[str, Any]:
+        base = self._project(project)
+        git_cmd = shutil.which('git') or 'git'
+        if not (base / '.git').exists():
+            raise BridgeError('Git repository not initialized in this project')
+        ref = (target_sha or 'HEAD').strip()
+        if not re.fullmatch(r'HEAD|[0-9a-fA-F]{7,40}', ref):
+            raise BridgeError('Invalid commit reference for rollback')
+        try:
+            res_reset = subprocess.run([git_cmd, 'reset', '--hard', ref], cwd=base, capture_output=True, text=True, timeout=15)
+            if res_reset.returncode != 0:
+                raise BridgeError(f'Git rollback failed: {res_reset.stderr.strip() or res_reset.stdout.strip()}')
+            subprocess.run([git_cmd, 'clean', '-fd'], cwd=base, capture_output=True, text=True, timeout=15)
+            rev = subprocess.run([git_cmd, 'rev-parse', 'HEAD'], cwd=base, capture_output=True, text=True, timeout=10)
+            sha = rev.stdout.strip() if rev.returncode == 0 else ref
+            return {'success': True, 'rolled_back_to': sha}
+        except BridgeError:
+            raise
+        except Exception as e:
+            raise BridgeError(f'Git rollback error: {e}')
 
     def start_task(self, project: str, prompt: str, mode: str = 'build', agent: str = 'codex', model: str = '') -> dict[str, Any]:
         self._project(project)
@@ -649,7 +762,14 @@ class LocalCore:
                                 if msg:
                                     lines.append(msg[:1500]); self.append(task_id,'message',msg)
                             elif item.get('type') in {'command_execution','file_change'}:
+                                cmd_target = str(item.get('command', item.get('target', '')))
                                 self.append(task_id,'tool',f"{item.get('type')}: {item.get('status','')}")
+                                if self.is_destructive_command(cmd_target):
+                                    if not self.request_approval(task_id, 'confirm_destructive', cmd_target):
+                                        fail_marker = True
+                                        self.append(task_id, 'error', f'Destructive command blocked by user policy: {cmd_target}')
+                                        self._kill(proc)
+                                        break
                         elif kind in {'approval_request', 'request_approval'}:
                             action_type = data.get('action_type', data.get('tool', 'command_execution'))
                             target_cmd = data.get('target', data.get('command', ''))
@@ -890,7 +1010,11 @@ class LocalCore:
                 if rc==0:
                     self.set_status(task_id,'COMPLETED',verification='Verified: '+ ' '.join(command)+'\n'+verify_output[-2000:]);return
                 if attempt==1:
-                    self.set_status(task_id,'FAILED',error=f'Build verification failed after repair (exit {rc})',verification=verify_output);return
+                    self.append(task_id, 'verification', f'VERIFICATION_FAILED: {" ".join(command)} exited with code {rc} after repair attempt.')
+                    self.set_status(task_id,'FAILED',error=f'VERIFICATION_FAILED: Build verification failed after repair (exit {rc})',verification=verify_output);return
+                chk_sha = self.create_git_checkpoint(rec['project'], f'task-{task_id[:8]}-pre-repair')
+                if chk_sha:
+                    self.append(task_id, 'log', f'Created pre-repair Git checkpoint {chk_sha[:8]} (rollback available)')
                 self.set_status(task_id,'REPAIRING',verification=verify_output)
                 fix_prompt=(f'Your previous task for project {rec["project"]} was not verified.\n'
                             f'Command: {" ".join(command)}\nExit code: {rc}\nError log:\n{REDACTION.sub("[REDACTED]",verify_output)[-2400:]}\n'

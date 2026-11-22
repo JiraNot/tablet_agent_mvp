@@ -1539,24 +1539,45 @@ fun GitReviewDialog(
         confirmButton = {
             val isClean = statusObj?.optBoolean("clean", true) ?: true
             if (!isClean) {
-                Button(
-                    onClick = {
-                        committing = true
-                        scope.launch {
-                            try {
-                                api.gitCommit(project, commitMessage.trim())
-                                refresh()
-                                onCommitted()
-                            } catch (e: Exception) {
-                                notify(e)
-                            } finally {
-                                committing = false
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = {
+                            committing = true
+                            scope.launch {
+                                try {
+                                    api.gitRollback(project)
+                                    refresh()
+                                    notify(Throwable("Rolled back uncommitted changes to HEAD checkpoint"))
+                                } catch (e: Exception) {
+                                    notify(e)
+                                } finally {
+                                    committing = false
+                                }
                             }
-                        }
-                    },
-                    enabled = !committing && commitMessage.isNotBlank()
-                ) {
-                    Text(if (committing) "Committing…" else "Commit changes")
+                        },
+                        enabled = !committing
+                    ) {
+                        Text("Rollback to HEAD")
+                    }
+                    Button(
+                        onClick = {
+                            committing = true
+                            scope.launch {
+                                try {
+                                    api.gitCommit(project, commitMessage.trim())
+                                    refresh()
+                                    onCommitted()
+                                } catch (e: Exception) {
+                                    notify(e)
+                                } finally {
+                                    committing = false
+                                }
+                            }
+                        },
+                        enabled = !committing && commitMessage.isNotBlank()
+                    ) {
+                        Text(if (committing) "Committing…" else "Commit changes")
+                    }
                 }
             }
         },

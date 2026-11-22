@@ -172,5 +172,26 @@ class AdapterTests(unittest.TestCase):
         evts = self.core.events(tid, 0)
         self.assertTrue(any(e['kind'] == 'error' and 'denied actions' in e['message'] for e in evts))
 
+    def test_normalized_agent_contracts(self):
+        from core import AgentCapabilities, AgentRun, AgentEvent, AgentApproval, AgentError, ResumeHandle
+        codex = CodexAdapter()
+        caps = codex.capabilities()
+        self.assertIsInstance(caps, AgentCapabilities)
+        self.assertEqual(caps.name, 'codex')
+        self.assertIn('confirm-destructive', caps.permission_scopes)
+        self.assertEqual(codex.permission_scope_for_mode('plan'), 'plan-only')
+        self.assertEqual(codex.permission_scope_for_mode('build'), 'workspace-write')
+
+        rh = ResumeHandle(project='proj', agent='codex', session_id='th-999')
+        run = AgentRun(task_id='t-1', project='proj', agent='codex', mode='build', permission_scope='workspace-write', model='gpt-6.2-sol', resume=rh)
+        self.assertEqual(run.resume.session_id, 'th-999')
+
+        ev = AgentEvent(kind='tool', message='command_execution: in_progress', action_type='command_execution', target='npm test')
+        ap = AgentApproval(id='a-1', task_id='t-1', type='confirm_destructive', target='rm -rf dist')
+        err = AgentError(code='VERIFICATION_FAILED', message='npm run build exited with code 1', recoverable=True)
+        self.assertEqual(ev.kind, 'tool')
+        self.assertEqual(ap.status, 'PENDING')
+        self.assertTrue(err.recoverable)
+
 if __name__ == '__main__':
     unittest.main()

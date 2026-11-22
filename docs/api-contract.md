@@ -23,6 +23,7 @@
 | GET | `/v1/projects/{name}/git/status` | workspace git status (uncommitted, untracked, modified) |
 | GET | `/v1/projects/{name}/git/diff` | unified git diff of uncommitted changes |
 | POST | `/v1/projects/{name}/git/commit` | `{message}`, audit-trailed manual commit |
+| POST | `/v1/projects/{name}/git/rollback` | discard uncommitted changes back to HEAD checkpoint |
 | GET | `/v1/projects/{name}/preview` | local process state/url |
 | POST | `/v1/projects/{name}/preview/start` | run npm dev, optional `{port}` |
 | POST | `/v1/projects/{name}/preview/stop` | terminate dev process |

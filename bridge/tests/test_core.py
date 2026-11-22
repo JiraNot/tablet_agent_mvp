@@ -168,5 +168,37 @@ class CoreTests(unittest.TestCase):
         self.core.append(tid,'log','L'*20000)
         evts=self.core.events(tid,0)
         self.assertLessEqual(len(evts[-1]['message']),6000)
+    def test_destructive_command_detection_and_approval_gate(self):
+        self.assertTrue(self.core.is_destructive_command('rm -rf /tmp/build'))
+        self.assertTrue(self.core.is_destructive_command('git reset --hard HEAD~1'))
+        self.assertTrue(self.core.is_destructive_command('git push origin main'))
+        self.assertFalse(self.core.is_destructive_command('npm run build'))
+        self.assertFalse(self.core.is_destructive_command('git status --porcelain'))
+    def test_git_checkpoint_and_rollback(self):
+        self.core.write_file('demo','index.js','console.log("v1");\n')
+        sha=self.core.create_git_checkpoint('demo','v1')
+        self.assertIsNotNone(sha)
+        self.core.write_file('demo','index.js','console.log("broken-v2");\n')
+        self.core.write_file('demo','untracked.txt','junk\n')
+        self.assertFalse(self.core.git_status('demo')['clean'])
+        rb=self.core.git_rollback('demo')
+        self.assertTrue(rb['success'])
+        self.assertTrue(self.core.git_status('demo')['clean'])
+        self.assertEqual(self.core.read_file('demo','index.js')['content'],'console.log("v1");\n')
+    def test_disk_full_atomic_write_leaves_original_intact(self):
+        self.core.write_file('demo','safe.txt','original-content')
+        with patch('os.fsync', side_effect=OSError(28, 'No space left on device')):
+            with self.assertRaises(OSError):
+                self.core.write_file('demo','safe.txt','corrupted-partial-write')
+        self.assertEqual(self.core.read_file('demo','safe.txt')['content'],'original-content')
+        leftovers = [p for p in (self.core._project('demo')).iterdir() if p.name.endswith('.tmp')]
+        self.assertEqual(leftovers, [])
+    def test_corrupt_sqlite_db_raises_cleanly(self):
+        bad_root = self.root / 'corrupt_data'
+        bad_root.mkdir(parents=True, exist_ok=True)
+        (bad_root / 'state.sqlite3').write_bytes(b'NOT_A_VALID_SQLITE_HEADER_1234567890')
+        import sqlite3
+        with self.assertRaises(sqlite3.DatabaseError):
+            LocalCore(bad_root)
 
 if __name__=='__main__':unittest.main()
