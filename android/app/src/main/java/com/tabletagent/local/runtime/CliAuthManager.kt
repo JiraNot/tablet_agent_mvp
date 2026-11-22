@@ -27,7 +27,8 @@ data class CliAuthState(
 data class AllCliAuthStatus(
     val codex: CliAuthState = CliAuthState(),
     val agy: CliAuthState = CliAuthState(),
-    val claude: CliAuthState = CliAuthState()
+    val claude: CliAuthState = CliAuthState(),
+    val loaded: Boolean = false
 )
 
 data class OAuthSessionState(
@@ -68,7 +69,7 @@ object CliAuthManager {
         val claudeStatus = checkClaudeAuth(context, hasAnthropicKey)
         val agyStatus = checkAgyAuth(context, hasGeminiKey)
 
-        AllCliAuthStatus(codex = codexStatus, agy = agyStatus, claude = claudeStatus)
+        AllCliAuthStatus(codex = codexStatus, agy = agyStatus, claude = claudeStatus, loaded = true)
     }
 
     private suspend fun checkCodexAuth(context: Context, hasApiKey: Boolean): CliAuthState {

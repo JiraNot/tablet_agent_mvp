@@ -59,6 +59,9 @@ class Handler(BaseHTTPRequestHandler):
                 obj=self._body();return self.reply(201,self.core.create_project(str(obj.get('name','')),str(obj.get('git_url',''))))
         if seg==['v1','agents'] and method=='GET':
             return self.reply(200,{'agents':self.core.available_agents()})
+        if seg==['v1','settings']:
+            if method=='GET':return self.reply(200,self.core.get_settings())
+            if method=='PUT':return self.reply(200,self.core.update_settings(self._body()))
         if seg==['v1','tasks']:
             if method=='GET':return self.reply(200,{'tasks':self.core.tasks(q.get('project',[None])[0])})
             if method=='POST':
@@ -69,7 +72,7 @@ class Handler(BaseHTTPRequestHandler):
             if len(seg)==4 and seg[3]=='events' and method=='GET':
                 try: after=int(q.get('after',[0])[0])
                 except (ValueError,TypeError):raise BridgeError('Invalid sequence')
-                return self.reply(200,{'events':self.core.events(tid,after)})
+                return self.reply(200,self.core.events_page(tid,after))
             if len(seg)==4 and seg[3]=='approvals' and method=='GET':
                 return self.reply(200,{'approvals':self.core.approvals(tid)})
             if len(seg)==5 and seg[3]=='approvals' and method=='POST':

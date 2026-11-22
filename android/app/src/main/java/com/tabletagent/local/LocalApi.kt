@@ -57,7 +57,11 @@ class LocalApi(private val deviceToken: String, port: Int = 8765) {
     suspend fun agents(): JSONArray = request("GET", "/v1/agents").getJSONArray("agents")
     suspend fun startTask(project: String, prompt: String, mode: String, agent: String = "codex", model: String = ""): JSONObject = request("POST", "/v1/tasks",
         JSONObject().put("project", project).put("prompt", prompt).put("mode", mode).put("agent", agent).put("model", model))
-    suspend fun events(taskId: String, after: Int): JSONArray = request("GET", "/v1/tasks/${encode(taskId)}/events?after=$after").getJSONArray("events")
+    suspend fun eventsPage(taskId: String, after: Int): JSONObject = request("GET", "/v1/tasks/${encode(taskId)}/events?after=$after")
+    suspend fun events(taskId: String, after: Int): JSONArray = eventsPage(taskId, after).getJSONArray("events")
+    suspend fun settings(): JSONObject = request("GET", "/v1/settings")
+    suspend fun updateSettings(codexProotBypass: Boolean): JSONObject = request("PUT", "/v1/settings",
+        JSONObject().put("codex_proot_sandbox_bypass", codexProotBypass))
     suspend fun approvals(taskId: String): JSONArray = request("GET", "/v1/tasks/${encode(taskId)}/approvals").getJSONArray("approvals")
     suspend fun respondApproval(taskId: String, approvalId: String, allow: Boolean): JSONObject = request("POST",
         "/v1/tasks/${encode(taskId)}/approvals/${encode(approvalId)}",

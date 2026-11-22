@@ -10,6 +10,7 @@ import re
 import secrets
 import shutil
 import signal
+import socket
 import sqlite3
 import subprocess
 import threading
@@ -26,7 +27,13 @@ MAX_LOG_CHARS = 6000
 MAX_FILE_BYTES = 256 * 1024
 MAX_EVENTS_PER_TASK = 2500
 NAME_RE = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9._-]{0,69}$')
-REDACTION = re.compile(r'(sk-[A-Za-z0-9_\-]{16,}|gh[pousr]_[A-Za-z0-9]{16,}|AIza[A-Za-z0-9_-]{20,})')
+REDACTION = re.compile(
+    r'(sk-(?:ant-|proj-)?[A-Za-z0-9_\-]{12,}'
+    r'|gh[pousr]_[A-Za-z0-9]{16,}'
+    r'|AIza[A-Za-z0-9_\-]{20,}'
+    r'|Bearer\s+[A-Za-z0-9._\-]{12,}'
+    r'|(?:OPENAI|ANTHROPIC|GEMINI|GOOGLE|GITHUB|GH|AWS|STRIPE|DATABASE|[A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|API_KEY))[A-Z0-9_]*\s*=\s*["\']?[^\s"\'\n]{4,})'
+)
 
 class BridgeError(Exception):
     def __init__(self, message: str, status: int = 400):
@@ -80,12 +87,30 @@ class CodexAdapter(BaseAgentAdapter):
             can_plan=True,
             can_build=True,
             supports_resume=True,
-            models=['default', 'o3-mini', 'o1', 'gpt-4o']
+            models=[
+                'default',
+                'gpt-6.2-sol',
+                'gpt-6.2-astra',
+                'gpt-6.1-terra',
+                'gpt-6.1-sol',
+                'gpt-6-astra',
+                'gpt-6-sol',
+                'gpt-6-luna',
+                'gpt-5.6-sol',
+                'gpt-5.6-terra',
+                'gpt-5.6-luna',
+            ]
         )
 
-    def build_cmd(self, project_path: Path, prompt: str, mode: str, thread_id: str | None = None, model: str = '') -> list[str]:
+    def build_cmd(self, project_path: Path, prompt: str, mode: str, thread_id: str | None = None, model: str = '', sandbox_override: str | None = None) -> list[str]:
         bin_cmd = self._resolve_binary(project_path)
-        cmd = bin_cmd + ['exec', '--json', '--sandbox', 'read-only' if mode == 'plan' else 'workspace-write', '--skip-git-repo-check']
+        if mode == 'plan':
+            sandbox = 'read-only'
+        elif sandbox_override == 'danger-full-access':
+            sandbox = 'danger-full-access'
+        else:
+            sandbox = 'workspace-write'
+        cmd = bin_cmd + ['exec', '--json', '--sandbox', sandbox, '--skip-git-repo-check']
         if thread_id and self.supports_resume:
             cmd += ['resume', thread_id]
         if model and model != 'default':
@@ -144,17 +169,44 @@ class AntigravityAdapter(BaseAgentAdapter):
             can_plan=True,
             can_build=True,
             supports_resume=True,
-            models=['default', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash']
+            models=[
+                'default',
+                'gemini-4-neon-high',
+                'gemini-4-neon-xhigh',
+                'gemini-4-neon-medium',
+                'gemini-4-neon-low',
+                'gemini-4-argon-high',
+                'gemini-4-argon-medium',
+                'gemini-4-argon-low',
+                'gemini-4-hydrogen-high',
+                'gemini-4-hydrogen-xhigh',
+                'gemini-4-hydrogen-medium',
+                'gemini-4-hydrogen-low',
+                'gemini-pro-orchestrator-neon',
+                'gemini-pro-orchestrator-g1-pro',
+                'gemini-3.8-flash-high',
+                'gemini-3.8-flash-medium',
+                'gemini-3.8-flash-low',
+                'claude-opus-5-5-high',
+                'claude-opus-5-5-medium',
+                'claude-opus-5-5-low',
+                'claude-sonnet-5-5-high',
+                'claude-sonnet-5-5-medium',
+                'claude-sonnet-5-5-low',
+                'gpt-oss-120b-medium',
+            ]
         )
 
     def build_cmd(self, project_path: Path, prompt: str, mode: str, thread_id: str | None = None, model: str = '') -> list[str]:
         bin_cmd = self._resolve_binary(project_path)
-        cmd = bin_cmd + ['--print', '--output-format', 'stream-json', '--mode', 'plan' if mode == 'plan' else 'accept-edits']
+        cmd = bin_cmd + ['--output-format', 'stream-json']
+        if mode == 'plan':
+            cmd += ['--mode', 'plan']
         if thread_id and self.supports_resume:
             cmd += ['--conversation', thread_id]
         if model and model != 'default':
             cmd += ['--model', model]
-        cmd.append(prompt)
+        cmd.append('--print=' + prompt)
         return cmd
 
 class LocalCore:
@@ -231,11 +283,104 @@ class LocalCore:
                 created_at REAL NOT NULL, resolved_at REAL
             );
             CREATE INDEX IF NOT EXISTS idx_approvals_task_status ON approvals(task_id, status);
+            CREATE TABLE IF NOT EXISTS settings(
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS process_pids(
+                id TEXT PRIMARY KEY,
+                pid INTEGER NOT NULL,
+                pgid INTEGER NOT NULL,
+                cmd_hint TEXT NOT NULL,
+                started_at REAL NOT NULL
+            );
             ''')
 
-    def _recover_interrupted(self):
+    def _register_pid(self, key: str, proc: subprocess.Popen, cmd_hint: str):
+        pgid = proc.pid
+        if hasattr(os, 'getpgid'):
+            try:
+                pgid = os.getpgid(proc.pid)
+            except OSError:
+                pgid = proc.pid
         with self._db() as db:
-            db.execute("UPDATE tasks SET status='INTERRUPTED', error='Bridge restarted; CLI process status unknown', updated_at=? WHERE status NOT IN ('PLANNED','COMPLETED','NEEDS_VERIFICATION','FAILED','CANCELLED','BLOCKED_SETUP','INTERRUPTED')", (time.time(),))
+            db.execute(
+                'INSERT INTO process_pids(id, pid, pgid, cmd_hint, started_at) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET pid=excluded.pid, pgid=excluded.pgid, cmd_hint=excluded.cmd_hint, started_at=excluded.started_at',
+                (key, proc.pid, pgid, cmd_hint[:80], time.time())
+            )
+
+    def _unregister_pid(self, key: str):
+        with self._db() as db:
+            db.execute('DELETE FROM process_pids WHERE id=?', (key,))
+
+    def _terminate_pid_record(self, pid: int, pgid: int, cmd_hint: str) -> bool:
+        if pid <= 1:
+            return False
+        proc_cmdline = Path(f'/proc/{pid}/cmdline')
+        if proc_cmdline.exists():
+            try:
+                raw_cmd = proc_cmdline.read_bytes().replace(b'\x00', b' ').decode('utf-8', errors='replace')
+                if cmd_hint and cmd_hint.lower() not in raw_cmd.lower():
+                    return False
+            except OSError:
+                return False
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        try:
+            if hasattr(os, 'killpg') and pgid > 1:
+                os.killpg(pgid, signal.SIGTERM)
+            else:
+                os.kill(pid, signal.SIGTERM)
+        except OSError:
+            return False
+        deadline = time.monotonic() + 0.6
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+                time.sleep(0.05)
+            except OSError:
+                return True
+        try:
+            if hasattr(os, 'killpg') and pgid > 1:
+                os.killpg(pgid, getattr(signal, 'SIGKILL', signal.SIGTERM))
+            else:
+                os.kill(pid, getattr(signal, 'SIGKILL', signal.SIGTERM))
+        except OSError:
+            pass
+        return True
+
+    def _recover_interrupted(self):
+        now = time.time()
+        with self._db() as db:
+            pids = [dict(r) for r in db.execute('SELECT pid, pgid, cmd_hint FROM process_pids').fetchall()]
+        for rec in pids:
+            self._terminate_pid_record(int(rec['pid']), int(rec['pgid']), str(rec['cmd_hint']))
+        with self._db() as db:
+            db.execute('DELETE FROM process_pids')
+            db.execute("UPDATE tasks SET status='INTERRUPTED', error='Bridge restarted; CLI process status unknown', updated_at=? WHERE status NOT IN ('PLANNED','COMPLETED','NEEDS_VERIFICATION','FAILED','CANCELLED','BLOCKED_SETUP','INTERRUPTED')", (now,))
+            db.execute("UPDATE approvals SET status='DENIED', resolved_at=? WHERE status='PENDING'", (now,))
+
+    def get_settings(self) -> dict[str, Any]:
+        with self._db() as db:
+            rows = db.execute('SELECT key, value FROM settings').fetchall()
+        raw = {r['key']: r['value'] for r in rows}
+        return {
+            'codex_proot_sandbox_bypass': raw.get('codex_proot_sandbox_bypass', 'false') == 'true'
+        }
+
+    def update_settings(self, patch: dict[str, Any]) -> dict[str, Any]:
+        if 'codex_proot_sandbox_bypass' in patch:
+            val = patch['codex_proot_sandbox_bypass']
+            if not isinstance(val, bool):
+                raise BridgeError('codex_proot_sandbox_bypass must be a boolean')
+            with self._db() as db:
+                db.execute(
+                    'INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                    ('codex_proot_sandbox_bypass', 'true' if val else 'false')
+                )
+        return self.get_settings()
 
     def _project(self, name: str) -> Path:
         if not NAME_RE.fullmatch(name) or name in {'.', '..'}:
@@ -286,6 +431,9 @@ class LocalCore:
         else:
             target.mkdir(mode=0o700)
             (target / 'README.md').write_text(f'# {name}\n')
+            gitignore = target / '.gitignore'
+            if not gitignore.exists():
+                gitignore.write_text('node_modules/\ndist/\n.next/\n.venv/\n__pycache__/\n.gradle/\n.env\n.env.*\n!.env.example\n', encoding='utf-8')
             if shutil.which('git'):
                 subprocess.run(['git', 'init', '-q', str(target)], capture_output=True, timeout=15)
         return {'name': name, 'git': (target / '.git').exists()}
@@ -355,6 +503,10 @@ class LocalCore:
                 cols.append(f'{k}=?'); vals.append(REDACTION.sub('[REDACTED]',v)[:6000])
         vals.append(task)
         with self._db() as db:
+            if status != 'CANCELLED':
+                cur = db.execute('SELECT status FROM tasks WHERE id=?', (task,)).fetchone()
+                if cur and cur['status'] == 'CANCELLED':
+                    return
             db.execute(f"UPDATE tasks SET {', '.join(cols)} WHERE id=?", vals)
         self.append(task, 'status', status)
 
@@ -374,10 +526,20 @@ class LocalCore:
             raise BridgeError('Task not found', 404)
         return dict(r)
 
-    def events(self, task_id: str, after_seq: int = 0) -> list[dict[str, Any]]:
+    def events_page(self, task_id: str, after_seq: int = 0) -> dict[str, Any]:
         self.task(task_id)
+        cursor = max(0, after_seq)
         with self._db() as db:
-            return [dict(r) for r in db.execute('SELECT * FROM events WHERE task_id=? AND seq>? ORDER BY seq LIMIT 120',(task_id,max(0,after_seq)))]
+            bounds = db.execute('SELECT MIN(seq) AS min_seq, MAX(seq) AS max_seq FROM events WHERE task_id=?', (task_id,)).fetchone()
+            rows = [dict(r) for r in db.execute('SELECT * FROM events WHERE task_id=? AND seq>? ORDER BY seq LIMIT 121', (task_id, cursor))]
+        has_more = len(rows) > 120
+        items = rows[:120]
+        min_seq = bounds['min_seq'] if bounds and bounds['min_seq'] is not None else 0
+        gap_detected = bool(cursor > 0 and min_seq > 0 and min_seq > cursor + 1)
+        return {'events': items, 'has_more': has_more, 'gap_detected': gap_detected, 'min_seq': min_seq}
+
+    def events(self, task_id: str, after_seq: int = 0) -> list[dict[str, Any]]:
+        return self.events_page(task_id, after_seq)['events']
 
     def available_agents(self) -> list[dict[str, Any]]:
         return [{
@@ -423,6 +585,8 @@ class LocalCore:
         proc = subprocess.Popen(actual_cmd, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True, errors='replace', bufsize=1,
                                 start_new_session=True)
+        pid_key = f'task:{task_id}'
+        self._register_pid(pid_key, proc, Path(actual_cmd[0]).stem or cmd[0])
         with self.lock:
             self.procs[task_id] = proc
         deadline=time.monotonic()+timeout
@@ -442,6 +606,36 @@ class LocalCore:
                 if phase=='agent':
                     try:
                         data=json.loads(line)
+                        ev = data.get('event','')
+                        if ev:
+                            if ev=='init':
+                                cid=data.get('conversation_id','')
+                                if isinstance(cid,str) and len(cid)>6:
+                                    self.thread_candidates[task_id]=cid
+                                    self.append(task_id,'thread',cid)
+                            elif ev=='step_update':
+                                su=data.get('step_update') or {}
+                                if su.get('step_type')=='tool' and su.get('state') in {'DONE','ERROR'}:
+                                    self.append(task_id,'tool',f"{su.get('tool_name','tool')}: {su.get('state')}")
+                            elif ev=='result':
+                                res=data.get('result') or {}
+                                cid=res.get('conversation_id','')
+                                if isinstance(cid,str) and len(cid)>6:
+                                    self.thread_candidates[task_id]=cid
+                                if res.get('status')=='SUCCESS':
+                                    resp_txt=res.get('response','')
+                                    denied=res.get('denied_actions') or []
+                                    if denied and not (isinstance(resp_txt,str) and resp_txt.strip()):
+                                        fail_marker=True
+                                        self.append(task_id,'error',f'Antigravity CLI denied actions: {json.dumps(denied,ensure_ascii=False)[:600]}')
+                                    else:
+                                        done_marker=True
+                                        if isinstance(resp_txt,str) and resp_txt.strip():
+                                            lines.append(resp_txt[:1500]); self.append(task_id,'message',resp_txt)
+                                else:
+                                    fail_marker=True
+                                    self.append(task_id,'error',json.dumps(res,ensure_ascii=False)[:1800])
+                            continue
                         kind=data.get('type','event')
                         if kind=='thread.started':
                             tid=data.get('thread_id','')
@@ -508,6 +702,7 @@ class LocalCore:
         finally:
             done.set()
             if proc.stdout: proc.stdout.close()
+            self._unregister_pid(pid_key)
             with self.lock:
                 if self.procs.get(task_id) is proc: self.procs.pop(task_id,None)
 
@@ -651,10 +846,16 @@ class LocalCore:
                 except Exception:
                     pass
         thread = self._thread_for_project(rec['project'], agent_name)
-        cmd = adapter.build_cmd(project_path, f'{policy}{instructions}\n\nUser task:\n{rec["prompt"]}', mode, thread, model)
+        prompt_text = f'{policy}{instructions}\n\nUser task:\n{rec["prompt"]}'
+        if agent_name == 'codex' and mode == 'build' and self.get_settings().get('codex_proot_sandbox_bypass'):
+            cmd = adapter.build_cmd(project_path, prompt_text, mode, thread, model, sandbox_override='danger-full-access')
+        else:
+            cmd = adapter.build_cmd(project_path, prompt_text, mode, thread, model)
         try:
             rc, output=self._run(task_id,cmd,project_path,timeout=1800,phase='agent')
             if self.task(task_id)['status']=='CANCELLED': return
+            if agent_name == 'codex' and mode == 'build' and 'cannot establish app-server socket mount isolation' in output:
+                self.append(task_id, 'error', 'Codex Linux sandbox is blocked in Android PRoot. Enable the opt-in Codex PRoot Build toggle in Settings -> Security to allow workspace writes.')
             if rc!=0:
                 self.set_status(task_id,'FAILED',error=f'{adapter.display_name} exited with status {rc}',result=output);return
             self._remember_thread(rec['project'],task_id, agent_name)
@@ -663,9 +864,13 @@ class LocalCore:
             self.set_status(task_id,'VERIFYING',result=output)
             pkg=project_path/'package.json'
             command=None
+            needs_install=False
             if pkg.is_file():
                 try:
-                    scripts=json.loads(pkg.read_text()).get('scripts',{})
+                    pkg_json=json.loads(pkg.read_text())
+                    scripts=pkg_json.get('scripts',{})
+                    has_deps=bool(pkg_json.get('dependencies') or pkg_json.get('devDependencies'))
+                    needs_install=has_deps and not (project_path/'node_modules').is_dir()
                     if 'build' in scripts and shutil.which('npm'):
                         command=['npm','run','build']
                     elif 'test' in scripts and shutil.which('npm'):
@@ -674,6 +879,11 @@ class LocalCore:
             if not command:
                 self.set_status(task_id,'NEEDS_VERIFICATION',verification='No supported npm build/test script found; do not claim verified success')
                 return
+            if needs_install and shutil.which('npm'):
+                rc_inst, inst_out = self._run(task_id, ['npm', 'install', '--no-audit', '--no-fund'], project_path, timeout=300, phase='verify')
+                if self.task(task_id)['status']=='CANCELLED': return
+                if rc_inst != 0:
+                    self.set_status(task_id,'FAILED',error=f'npm install failed (exit {rc_inst})',verification=inst_out); return
             for attempt in range(2):
                 rc, verify_output=self._run(task_id, command, project_path, timeout=300, phase='verify')
                 if self.task(task_id)['status']=='CANCELLED':return
@@ -726,15 +936,32 @@ class LocalCore:
         env=os.environ.copy();env.update({'PORT':str(port),'HOST':'127.0.0.1','HOSTNAME':'127.0.0.1'})
         # npm respects cwd and script; no shell construction in our process.
         npm_cmd = shutil.which('npm') or 'npm'
-        proc=subprocess.Popen([npm_cmd,'run','dev'], cwd=base, env=env,
+        dev_cmd = [npm_cmd, 'run', 'dev']
+        if 'vite' in script.lower() and '--host' not in script:
+            dev_cmd += ['--', '--host', '127.0.0.1', '--port', str(port)]
+        proc=subprocess.Popen(dev_cmd, cwd=base, env=env,
                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
                               start_new_session=True)
+        self._register_pid(f'preview:{project}', proc, Path(npm_cmd).stem or 'npm')
         with self.lock:self.previews[project]={'process':proc,'port':port}
-        return {'status':'starting','url':f'http://127.0.0.1:{port}', 'note':'Framework must bind 127.0.0.1 and respect PORT; some scripts need manual configuration'}
+        deadline = time.monotonic() + 12.0
+        status = 'starting'
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                with self.lock:self.previews.pop(project,None)
+                raise BridgeError(f'Preview server exited early (code {proc.returncode})', 500)
+            try:
+                with socket.create_connection(('127.0.0.1', port), timeout=0.2):
+                    status = 'running'
+                    break
+            except OSError:
+                time.sleep(0.15)
+        return {'status':status,'url':f'http://127.0.0.1:{port}', 'note':'Framework must bind 127.0.0.1 and respect PORT; some scripts need manual configuration'}
 
     def stop_preview(self,project:str):
         with self.lock: p=self.previews.pop(project,None)
         if p:self._kill(p['process'])
+        self._unregister_pid(f'preview:{project}')
         return {'status':'stopped'}
 
     def git_status(self, project: str) -> dict[str, Any]:

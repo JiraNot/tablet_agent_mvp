@@ -38,10 +38,15 @@ import com.tabletagent.local.runtime.EmbeddedBridgeStatus
 import com.tabletagent.local.runtime.ExecutionResult
 import com.tabletagent.local.runtime.ProviderKeySummary
 import com.tabletagent.local.runtime.SecureSecrets
+import com.tabletagent.local.ui.AionClaudeAgentPane
+import com.tabletagent.local.ui.AionClaudeSidebar
+import com.tabletagent.local.ui.ClaudeCodeTopBar
 import com.tabletagent.local.ui.CliOAuthDialog
 import com.tabletagent.local.ui.OfficialCliCard
 import com.tabletagent.local.ui.PhaseStepperBar
 import com.tabletagent.local.ui.ProviderApiKeysCard
+import com.tabletagent.local.ui.aionClaudeDarkScheme
+import com.tabletagent.local.ui.aionClaudeLightScheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -86,6 +91,9 @@ fun TabletAgentApp() {
     val api = remember(token, bridgePort) { LocalApi(token, bridgePort) }
     var bridgeRuntime by remember { mutableStateOf("") }
     var tab by rememberSaveable { mutableIntStateOf(0) }
+    var darkTheme by rememberSaveable { mutableStateOf(false) }
+    var sidebarOpen by rememberSaveable { mutableStateOf(true) }
+    var isNewChatMode by rememberSaveable { mutableStateOf(false) }
     var online by remember { mutableStateOf(false) }
     var projects by remember { mutableStateOf<List<JSONObject>>(emptyList()) }
     var selectedProject by rememberSaveable { mutableStateOf("") }
@@ -154,23 +162,52 @@ fun TabletAgentApp() {
         approvals = emptyList()
         eventCursor = 0
     }
-    // Reconnect/poll on-device: no remote server or external networking.
+    // Reconnect/poll on-device: throttled and non-mutating on identical snapshots to prevent scroll lag.
+    var pollTick by remember { mutableIntStateOf(0) }
+    var lastTasksRaw by remember { mutableStateOf("") }
+    var lastProjectsRaw by remember { mutableStateOf("") }
+    var lastApprovalsRaw by remember { mutableStateOf("") }
     LaunchedEffect(token, bridgePort, selectedProject, selectedTask) {
+        pollTick = 0
+        lastTasksRaw = ""
+        lastApprovalsRaw = ""
         while (isActive) {
             val healthObj = api.healthInfo()
-            online = healthObj != null
-            bridgeRuntime = healthObj?.optString("runtime", "") ?: ""
-            if (online && token.isNotBlank()) {
+            val isOnline = healthObj != null
+            if (online != isOnline) online = isOnline
+            val rt = healthObj?.optString("runtime", "") ?: ""
+            if (bridgeRuntime != rt) bridgeRuntime = rt
+            if (isOnline && token.isNotBlank()) {
                 try {
-                    runCatching { availableAgents = api.agents().objects() }
-                    projects = api.projects().objects()
-                    if (selectedProject.isBlank() && projects.isNotEmpty()) {
-                        selectedProject = projects.first().getString("name")
+                    if (availableAgents.isEmpty() || pollTick % 10 == 0) {
+                        runCatching {
+                            val arr = api.agents()
+                            if (availableAgents.size != arr.length()) availableAgents = arr.objects()
+                        }
+                    }
+                    if (projects.isEmpty() || pollTick % 6 == 0) {
+                        val projArr = api.projects()
+                        val projRaw = projArr.toString()
+                        if (projRaw != lastProjectsRaw) {
+                            lastProjectsRaw = projRaw
+                            projects = projArr.objects()
+                        }
+                        if (selectedProject.isBlank() && projects.isNotEmpty()) {
+                            selectedProject = projects.first().getString("name")
+                        }
                     }
                     if (selectedProject.isNotBlank()) {
-                        tasks = api.tasks(selectedProject).objects()
+                        val tasksArr = api.tasks(selectedProject)
+                        val tasksRaw = tasksArr.toString()
+                        if (tasksRaw != lastTasksRaw) {
+                            lastTasksRaw = tasksRaw
+                            tasks = tasksArr.objects()
+                        }
                         val activeTask = tasks.firstOrNull {
                             it.optString("status") in listOf("QUEUED", "PLANNING", "WAITING_APPROVAL", "EXECUTING", "VERIFYING", "REPAIRING")
+                        }
+                        if (!isNewChatMode && selectedTask.isBlank() && tasks.isNotEmpty()) {
+                            selectedTask = (activeTask ?: tasks.first()).optString("id")
                         }
                         if (activeTask != null) {
                             AgentForegroundService.update(
@@ -182,17 +219,41 @@ fun TabletAgentApp() {
                         } else if (tasks.isNotEmpty() && tasks.all { it.optString("status") in listOf("PLANNED", "COMPLETED", "NEEDS_VERIFICATION", "FAILED", "CANCELLED", "BLOCKED_SETUP", "INTERRUPTED") }) {
                             AgentForegroundService.stop(context)
                         }
-                        val p = api.previewStatus(selectedProject)
-                        previewState = p.optString("status", "stopped")
-                        previewUrl = p.optString("url", "")
+                        if (pollTick % 3 == 0) {
+                            val p = api.previewStatus(selectedProject)
+                            val pState = p.optString("status", "stopped")
+                            val pUrl = p.optString("url", "")
+                            if (previewState != pState) previewState = pState
+                            if (previewUrl != pUrl) previewUrl = pUrl
+                        }
                         if (selectedTask.isNotBlank()) {
-                            val fresh = api.events(selectedTask, eventCursor).objects()
-                            if (fresh.isNotEmpty()) {
-                                eventCursor = fresh.last().optInt("seq", eventCursor)
-                                events = (events + fresh).takeLast(220)
+                            var keepPaging = true
+                            while (keepPaging) {
+                                val page = api.eventsPage(selectedTask, eventCursor)
+                                val fresh = page.optJSONArray("events")?.objects() ?: emptyList()
+                                val gap = page.optBoolean("gap_detected", false)
+                                val prefix = if (gap) {
+                                    listOf(JSONObject().put("seq", -1).put("kind", "log").put("message", "Event history gap detected after reconnect; showing retained events."))
+                                } else emptyList()
+                                if (fresh.isNotEmpty() || gap) {
+                                    if (fresh.isNotEmpty()) {
+                                        eventCursor = fresh.last().optInt("seq", eventCursor)
+                                    }
+                                    events = (events + prefix + fresh).takeLast(220)
+                                }
+                                keepPaging = page.optBoolean("has_more", false) && fresh.isNotEmpty()
                             }
-                            runCatching { approvals = api.approvals(selectedTask).objects() }
-                        } else {
+                            if (activeTask != null || pollTick == 0) {
+                                runCatching {
+                                    val appArr = api.approvals(selectedTask)
+                                    val appRaw = appArr.toString()
+                                    if (appRaw != lastApprovalsRaw) {
+                                        lastApprovalsRaw = appRaw
+                                        approvals = appArr.objects()
+                                    }
+                                }
+                            }
+                        } else if (approvals.isNotEmpty()) {
                             approvals = emptyList()
                         }
                     }
@@ -202,212 +263,236 @@ fun TabletAgentApp() {
                     }
                 }
             }
-            delay(2400)
+            pollTick++
+            val hasRunningTask = tasks.any {
+                it.optString("status") in listOf("QUEUED", "PLANNING", "WAITING_APPROVAL", "EXECUTING", "VERIFYING", "REPAIRING")
+            }
+            delay(if (hasRunningTask) 1100L else 3200L)
         }
     }
     LaunchedEffect(tab, selectedProject, fileDir) {
-        if (tab == 2 && token.isNotBlank() && selectedProject.isNotBlank()) {
+        if (tab == 3 && token.isNotBlank() && selectedProject.isNotBlank()) {
             runCatching { api.files(selectedProject, fileDir).objects() }
                 .onSuccess { files = it }
                 .onFailure { notify(it) }
         }
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(title = { Column {
-                Text("Tablet Agent Studio", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (isRuntimeReady) {
-                        Surface(
-                            color = MaterialTheme.colorScheme.primaryContainer,
-                            shape = MaterialTheme.shapes.extraSmall
-                        ) {
-                            Text(
-                                "EMBEDDED PROOT",
-                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                        Spacer(Modifier.width(6.dp))
-                    }
-                    Text(
-                        when {
-                            online && bridgeRuntime == "embedded" -> "Embedded Bridge (:$bridgePort)"
-                            online -> "Termux Bridge (:$bridgePort)"
-                            bridgeStatus is EmbeddedBridgeStatus.Starting -> "Starting embedded bridge..."
-                            isRuntimeReady -> "Standalone runtime ready"
-                            else -> "Bridge offline"
+    MaterialTheme(colorScheme = if (darkTheme) aionClaudeDarkScheme() else aionClaudeLightScheme()) {
+        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            Row(Modifier.fillMaxSize()) {
+                if (sidebarOpen) {
+                    AionClaudeSidebar(
+                        projects = projects,
+                        selectedProject = selectedProject,
+                        onSelectProject = { name ->
+                            selectedProject = name; selectedTask = ""; isNewChatMode = false
+                            events = emptyList(); eventCursor = 0; fileDir = "."; fileName = ""
                         },
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (online || isRuntimeReady) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                        onNewProject = { createDialog = true },
+                        tasks = tasks,
+                        selectedTask = selectedTask,
+                        isNewChatMode = isNewChatMode,
+                        onNewChat = {
+                            selectedTask = ""; isNewChatMode = true; events = emptyList(); eventCursor = 0; tab = 0
+                        },
+                        onSelectTask = { tid ->
+                            selectedTask = tid; isNewChatMode = false
+                            if (tab > 1) tab = 0
+                        },
+                        darkTheme = darkTheme,
+                        onToggleTheme = { darkTheme = !darkTheme },
+                        onOpenSettings = { tab = 4 }
                     )
                 }
-            } }, actions = { IconButton(onClick = { tab = 3 }) { Icon(Icons.Default.Settings, "Settings") } })
-        },
-        bottomBar = {
-            NavigationBar {
-                listOf(Triple("Agent", Icons.Default.SmartToy, 0), Triple("Preview", Icons.Default.Visibility, 1),
-                    Triple("Files", Icons.Default.FolderOpen, 2), Triple("Settings", Icons.Default.Tune, 3)).forEach { (label, icon, index) ->
-                    NavigationBarItem(selected = tab == index, onClick = { tab = index }, icon = { Icon(icon, null) }, label = { Text(label) })
-                }
-            }
-        }
-    ) { inset ->
-        Column(Modifier.padding(inset).fillMaxSize().padding(horizontal = 12.dp)) {
-            if (bootstrapStatus is BootstrapStatus.Extracting) {
-                val ext = bootstrapStatus as BootstrapStatus.Extracting
-                Surface(
-                    color = MaterialTheme.colorScheme.primaryContainer,
-                    shape = MaterialTheme.shapes.medium,
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
-                ) {
-                    Column(Modifier.padding(12.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.CloudSync, null, tint = MaterialTheme.colorScheme.onPrimaryContainer)
-                            Spacer(Modifier.width(8.dp))
-                            Text("Setting up Standalone AI Runtime (offline ready)...", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleSmall)
-                        }
-                        Spacer(Modifier.height(4.dp))
-                        Text("Extracting embedded PRoot + Alpine Linux aarch64 (Node 22, Git, Python 3)...", style = MaterialTheme.typography.bodySmall)
-                        Spacer(Modifier.height(8.dp))
-                        LinearProgressIndicator(progress = { ext.progress }, modifier = Modifier.fillMaxWidth())
-                        Spacer(Modifier.height(4.dp))
-                        Text(ext.currentFile, style = MaterialTheme.typography.labelSmall, maxLines = 1)
-                    }
-                }
-                Spacer(Modifier.height(6.dp))
-            }
-            if (error.isNotBlank()) {
-                Surface(color = MaterialTheme.colorScheme.errorContainer, shape = MaterialTheme.shapes.small) {
-                    Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text(error, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-                        IconButton(onClick = { error = "" }, modifier = Modifier.size(28.dp)) { Icon(Icons.Default.Close, null) }
-                    }
-                }
-                Spacer(Modifier.height(6.dp))
-            }
-            if (tab != 3) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Box {
-                        OutlinedButton(onClick = { pickerExpanded = true }) {
-                            Icon(Icons.Default.Folder, null, Modifier.size(18.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text(selectedProject.ifEmpty { "Select project" })
-                            Icon(Icons.Default.ArrowDropDown, null)
-                        }
-                        DropdownMenu(expanded = pickerExpanded, onDismissRequest = { pickerExpanded = false }) {
-                            projects.forEach { obj ->
-                                val name = obj.optString("name")
-                                DropdownMenuItem(text = { Text(name) }, onClick = {
-                                    selectedProject = name; selectedTask = ""; events = emptyList(); eventCursor = 0; fileDir = "."; fileName = ""; pickerExpanded = false
-                                })
+                Column(Modifier.weight(1f).fillMaxHeight()) {
+                    val activeTaskObj = tasks.firstOrNull { it.optString("id") == selectedTask }
+                    ClaudeCodeTopBar(
+                        sidebarOpen = sidebarOpen,
+                        onToggleSidebar = { sidebarOpen = !sidebarOpen },
+                        selectedProject = selectedProject,
+                        currentTask = activeTaskObj,
+                        isNewChatMode = isNewChatMode,
+                        online = online,
+                        bridgePort = bridgePort,
+                        workspaceView = tab,
+                        onSelectWorkspaceView = { tab = it },
+                        onOpenGit = { gitReviewDialog = true }
+                    )
+                    Column(Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 8.dp)) {
+                        if (bootstrapStatus is BootstrapStatus.Extracting) {
+                            val ext = bootstrapStatus as BootstrapStatus.Extracting
+                            Surface(
+                                color = MaterialTheme.colorScheme.primaryContainer,
+                                shape = MaterialTheme.shapes.medium,
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                            ) {
+                                Column(Modifier.padding(12.dp)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(Icons.Default.CloudSync, null, tint = MaterialTheme.colorScheme.onPrimaryContainer)
+                                        Spacer(Modifier.width(8.dp))
+                                        Text("Setting up Standalone AI Runtime (offline ready)...", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleSmall)
+                                    }
+                                    Spacer(Modifier.height(4.dp))
+                                    Text("Extracting embedded PRoot + Alpine Linux aarch64 (Node 22, Git, Python 3)...", style = MaterialTheme.typography.bodySmall)
+                                    Spacer(Modifier.height(8.dp))
+                                    LinearProgressIndicator(progress = { ext.progress }, modifier = Modifier.fillMaxWidth())
+                                    Spacer(Modifier.height(4.dp))
+                                    Text(ext.currentFile, style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                                }
                             }
+                            Spacer(Modifier.height(6.dp))
                         }
-                    }
-                    Spacer(Modifier.weight(1f))
-                    if (selectedProject.isNotBlank()) {
-                        OutlinedButton(onClick = { gitReviewDialog = true }) {
-                            Icon(Icons.Default.History, null, Modifier.size(18.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("Git")
+                        if (error.isNotBlank()) {
+                            Surface(color = MaterialTheme.colorScheme.errorContainer, shape = MaterialTheme.shapes.small) {
+                                Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    Text(error, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                                    IconButton(onClick = { error = "" }, modifier = Modifier.size(28.dp)) { Icon(Icons.Default.Close, null) }
+                                }
+                            }
+                            Spacer(Modifier.height(6.dp))
                         }
-                        Spacer(Modifier.width(6.dp))
-                    }
-                    IconButton(onClick = { createDialog = true }) { Icon(Icons.Default.CreateNewFolder, "New project") }
-                }
-                Spacer(Modifier.height(6.dp))
-            }
-            when (tab) {
-                0 -> BoxWithConstraints(Modifier.fillMaxSize()) {
-                    val isWide = maxWidth >= 850.dp
-                    if (isWide) Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Box(Modifier.weight(.51f).fillMaxHeight()) {
-                            AgentScreen(
-                    prompt = prompt, onPrompt = { prompt = it }, mode = mode, onMode = { mode = it },
-                    agents = availableAgents, selectedAgent = selectedAgent, onSelectAgent = { selectedAgent = it },
-                    selectedModel = selectedModel, onSelectModel = { selectedModel = it },
-                    tasks = tasks, selectedTask = selectedTask, onSelectTask = { selectedTask = it }, events = events,
-                    approvals = approvals,
-                    canRun = online && token.isNotBlank() && selectedProject.isNotBlank(),
-                    onSend = { scope.launch {
-                        try {
-                            val t = api.startTask(selectedProject, prompt, mode, selectedAgent, if (selectedModel == "default") "" else selectedModel)
-                            val taskId = t.getString("id")
-                            selectedTask = taskId
-                            AgentForegroundService.start(context, taskId, selectedProject, mode.uppercase(), prompt)
-                            prompt = ""; error = ""
-                            tasks = api.tasks(selectedProject).objects()
-                        } catch (e: Exception) { notify(e) }
-                    } },
-                    onCancel = { scope.launch { runCatching {
-                        api.cancelTask(selectedTask)
-                        AgentForegroundService.stop(context)
-                        tasks = api.tasks(selectedProject).objects()
-                    }.onFailure { notify(it) } } },
-                    onApprove = { aid -> scope.launch { runCatching {
-                        api.respondApproval(selectedTask, aid, true)
-                        approvals = api.approvals(selectedTask).objects()
-                    }.onFailure { notify(it) } } },
-                    onDeny = { aid -> scope.launch { runCatching {
-                        api.respondApproval(selectedTask, aid, false)
-                        approvals = api.approvals(selectedTask).objects()
-                    }.onFailure { notify(it) } } },
-                    onCommitClick = { gitReviewDialog = true }
+                        when (tab) {
+                            0 -> AionClaudeAgentPane(
+                                prompt = prompt, onPrompt = { prompt = it },
+                                mode = mode, onMode = { mode = it },
+                                agents = availableAgents, selectedAgent = selectedAgent, onSelectAgent = { selectedAgent = it },
+                                selectedModel = selectedModel, onSelectModel = { selectedModel = it },
+                                cliAuthStatus = cliAuthStatus, isEmbeddedRuntime = isRuntimeReady,
+                                selectedProject = selectedProject, projects = projects,
+                                onSelectProject = { name ->
+                                    selectedProject = name; selectedTask = ""; events = emptyList(); eventCursor = 0; fileDir = "."; fileName = ""
+                                },
+                                onOpenSettings = { tab = 4 },
+                                tasks = tasks, selectedTask = selectedTask,
+                                isNewChatMode = isNewChatMode,
+                                onNewChat = { selectedTask = ""; isNewChatMode = true; events = emptyList(); eventCursor = 0 },
+                                events = events, approvals = approvals,
+                                canRun = online && token.isNotBlank() && selectedProject.isNotBlank(),
+                                onSend = {
+                                    scope.launch {
+                                        try {
+                                            val t = api.startTask(selectedProject, prompt, mode, selectedAgent, if (selectedModel == "default") "" else selectedModel)
+                                            val taskId = t.getString("id")
+                                            selectedTask = taskId
+                                            isNewChatMode = false
+                                            AgentForegroundService.start(context, taskId, selectedProject, mode.uppercase(), prompt)
+                                            prompt = ""; error = ""
+                                            tasks = api.tasks(selectedProject).objects()
+                                        } catch (e: Exception) { notify(e) }
+                                    }
+                                },
+                                onCancel = {
+                                    scope.launch {
+                                        runCatching {
+                                            api.cancelTask(selectedTask)
+                                            AgentForegroundService.stop(context)
+                                            tasks = api.tasks(selectedProject).objects()
+                                        }.onFailure { notify(it) }
+                                    }
+                                },
+                                onApprove = { aid ->
+                                    scope.launch {
+                                        runCatching {
+                                            api.respondApproval(selectedTask, aid, true)
+                                            approvals = api.approvals(selectedTask).objects()
+                                        }.onFailure { notify(it) }
+                                    }
+                                },
+                                onDeny = { aid ->
+                                    scope.launch {
+                                        runCatching {
+                                            api.respondApproval(selectedTask, aid, false)
+                                            approvals = api.approvals(selectedTask).objects()
+                                        }.onFailure { notify(it) }
+                                    }
+                                },
+                                onCommitClick = { gitReviewDialog = true }
                             )
-                        }
-                        Box(Modifier.weight(.49f).fillMaxHeight()) { PreviewScreen(previewUrl, previewState,
-                            onStart = { scope.launch { runCatching { val p = api.previewStart(selectedProject); previewUrl = p.optString("url", ""); previewState = p.optString("status", "starting") }.onFailure { notify(it) } } },
-                            onStop = { scope.launch { runCatching { api.previewStop(selectedProject); previewState = "stopped"; previewUrl = "" }.onFailure { notify(it) } } },
-                            enabled = online && selectedProject.isNotBlank()) }
-                    } else AgentScreen(
-                        prompt = prompt, onPrompt = { prompt = it }, mode = mode, onMode = { mode = it },
-                        agents = availableAgents, selectedAgent = selectedAgent, onSelectAgent = { selectedAgent = it },
-                        selectedModel = selectedModel, onSelectModel = { selectedModel = it },
-                        tasks = tasks, selectedTask = selectedTask, onSelectTask = { selectedTask = it }, events = events,
-                        approvals = approvals,
-                        canRun = online && token.isNotBlank() && selectedProject.isNotBlank(),
-                        onSend = { scope.launch {
-                            try {
-                                val t = api.startTask(selectedProject, prompt, mode, selectedAgent, if (selectedModel == "default") "" else selectedModel)
-                                val taskId = t.getString("id")
-                                selectedTask = taskId
-                                AgentForegroundService.start(context, taskId, selectedProject, mode.uppercase(), prompt)
-                                prompt = ""; error = ""
-                                tasks = api.tasks(selectedProject).objects()
-                            } catch (e: Exception) { notify(e) }
-                        } },
-                        onCancel = { scope.launch { runCatching {
-                            api.cancelTask(selectedTask)
-                            AgentForegroundService.stop(context)
-                            tasks = api.tasks(selectedProject).objects()
-                        }.onFailure { notify(it) } } },
-                        onApprove = { aid -> scope.launch { runCatching {
-                            api.respondApproval(selectedTask, aid, true)
-                            approvals = api.approvals(selectedTask).objects()
-                        }.onFailure { notify(it) } } },
-                        onDeny = { aid -> scope.launch { runCatching {
-                            api.respondApproval(selectedTask, aid, false)
-                            approvals = api.approvals(selectedTask).objects()
-                        }.onFailure { notify(it) } } },
-                        onCommitClick = { gitReviewDialog = true }
-                    )
-                }
-                1 -> PreviewScreen(previewUrl, previewState,
-                    onStart = { scope.launch { runCatching { val p = api.previewStart(selectedProject); previewUrl = p.optString("url", ""); previewState = p.optString("status", "starting") }.onFailure { notify(it) } } },
-                    onStop = { scope.launch { runCatching { api.previewStop(selectedProject); previewState = "stopped"; previewUrl = "" }.onFailure { notify(it) } } },
-                    enabled = online && selectedProject.isNotBlank())
-                2 -> FilesScreen(files, fileDir, fileName, fileBody,
-                    onFolder = { fileDir = it; fileName = "" },
-                    onFile = { path -> scope.launch { runCatching { api.file(selectedProject, path) }
-                        .onSuccess { fileName = path; fileBody = it.optString("content", "") }
-                        .onFailure { notify(it) } } },
-                    onEdit = { fileBody = it },
-                    onSave = { scope.launch { runCatching { api.saveFile(selectedProject, fileName, fileBody) }
-                        .onSuccess { error = "Saved $fileName" }
-                        .onFailure { notify(it) } } })
-                3 -> SettingsScreen(
+                            1 -> Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Box(Modifier.weight(0.52f).fillMaxHeight()) {
+                                    AionClaudeAgentPane(
+                                        prompt = prompt, onPrompt = { prompt = it },
+                                        mode = mode, onMode = { mode = it },
+                                        agents = availableAgents, selectedAgent = selectedAgent, onSelectAgent = { selectedAgent = it },
+                                        selectedModel = selectedModel, onSelectModel = { selectedModel = it },
+                                        cliAuthStatus = cliAuthStatus, isEmbeddedRuntime = isRuntimeReady,
+                                        selectedProject = selectedProject, projects = projects,
+                                        onSelectProject = { name ->
+                                            selectedProject = name; selectedTask = ""; events = emptyList(); eventCursor = 0; fileDir = "."; fileName = ""
+                                        },
+                                        onOpenSettings = { tab = 4 },
+                                        tasks = tasks, selectedTask = selectedTask,
+                                        isNewChatMode = isNewChatMode,
+                                        onNewChat = { selectedTask = ""; isNewChatMode = true; events = emptyList(); eventCursor = 0 },
+                                        events = events, approvals = approvals,
+                                        canRun = online && token.isNotBlank() && selectedProject.isNotBlank(),
+                                        onSend = {
+                                            scope.launch {
+                                                try {
+                                                    val t = api.startTask(selectedProject, prompt, mode, selectedAgent, if (selectedModel == "default") "" else selectedModel)
+                                                    val taskId = t.getString("id")
+                                                    selectedTask = taskId
+                                                    isNewChatMode = false
+                                                    AgentForegroundService.start(context, taskId, selectedProject, mode.uppercase(), prompt)
+                                                    prompt = ""; error = ""
+                                                    tasks = api.tasks(selectedProject).objects()
+                                                } catch (e: Exception) { notify(e) }
+                                            }
+                                        },
+                                        onCancel = {
+                                            scope.launch {
+                                                runCatching {
+                                                    api.cancelTask(selectedTask)
+                                                    AgentForegroundService.stop(context)
+                                                    tasks = api.tasks(selectedProject).objects()
+                                                }.onFailure { notify(it) }
+                                            }
+                                        },
+                                        onApprove = { aid ->
+                                            scope.launch {
+                                                runCatching {
+                                                    api.respondApproval(selectedTask, aid, true)
+                                                    approvals = api.approvals(selectedTask).objects()
+                                                }.onFailure { notify(it) }
+                                            }
+                                        },
+                                        onDeny = { aid ->
+                                            scope.launch {
+                                                runCatching {
+                                                    api.respondApproval(selectedTask, aid, false)
+                                                    approvals = api.approvals(selectedTask).objects()
+                                                }.onFailure { notify(it) }
+                                            }
+                                        },
+                                        onCommitClick = { gitReviewDialog = true }
+                                    )
+                                }
+                                Box(Modifier.weight(0.48f).fillMaxHeight()) {
+                                    PreviewScreen(
+                                        previewUrl, previewState,
+                                        onStart = { scope.launch { runCatching { val p = api.previewStart(selectedProject); previewUrl = p.optString("url", ""); previewState = p.optString("status", "starting") }.onFailure { notify(it) } } },
+                                        onStop = { scope.launch { runCatching { api.previewStop(selectedProject); previewState = "stopped"; previewUrl = "" }.onFailure { notify(it) } } },
+                                        enabled = online && selectedProject.isNotBlank()
+                                    )
+                                }
+                            }
+                            2 -> PreviewScreen(
+                                previewUrl, previewState,
+                                onStart = { scope.launch { runCatching { val p = api.previewStart(selectedProject); previewUrl = p.optString("url", ""); previewState = p.optString("status", "starting") }.onFailure { notify(it) } } },
+                                onStop = { scope.launch { runCatching { api.previewStop(selectedProject); previewState = "stopped"; previewUrl = "" }.onFailure { notify(it) } } },
+                                enabled = online && selectedProject.isNotBlank()
+                            )
+                            3 -> FilesScreen(files, fileDir, fileName, fileBody,
+                                onFolder = { fileDir = it; fileName = "" },
+                                onFile = { path -> scope.launch { runCatching { api.file(selectedProject, path) }
+                                    .onSuccess { fileName = path; fileBody = it.optString("content", "") }
+                                    .onFailure { notify(it) } } },
+                                onEdit = { fileBody = it },
+                                onSave = { scope.launch { runCatching { api.saveFile(selectedProject, fileName, fileBody) }
+                                    .onSuccess { error = "Saved $fileName" }
+                                    .onFailure { notify(it) } } })
+                            4 -> SettingsScreen(
                     tokenEntry = tokenEntry,
                     onToken = { tokenEntry = it },
                     onSave = {
@@ -492,6 +577,9 @@ fun TabletAgentApp() {
                     notify = notify
                 )
             }
+                    }
+                }
+            }
         }
     }
     if (oauthState.cliType.isNotBlank()) {
@@ -537,6 +625,9 @@ fun TabletAgentApp() {
 private fun AgentScreen(prompt: String, onPrompt: (String) -> Unit, mode: String, onMode: (String) -> Unit,
                         agents: List<JSONObject> = emptyList(), selectedAgent: String = "codex", onSelectAgent: (String) -> Unit = {},
                         selectedModel: String = "default", onSelectModel: (String) -> Unit = {},
+                        cliAuthStatus: AllCliAuthStatus = AllCliAuthStatus(),
+                        isEmbeddedRuntime: Boolean = false,
+                        onOpenSettings: () -> Unit = {},
                         tasks: List<JSONObject>, selectedTask: String, onSelectTask: (String) -> Unit,
                         events: List<JSONObject>, approvals: List<JSONObject> = emptyList(),
                         canRun: Boolean, onSend: () -> Unit, onCancel: () -> Unit,
@@ -607,36 +698,64 @@ private fun AgentScreen(prompt: String, onPrompt: (String) -> Unit, mode: String
             }
         }
         Spacer(Modifier.height(4.dp))
+        val rawAgents = if (agents.isNotEmpty()) agents.map {
+            Triple(it.optString("name"), it.optString("display_name"), it.optBoolean("available", true))
+        } else listOf(
+            Triple("codex", "Codex CLI", true),
+            Triple("claude", "Claude Code", true),
+            Triple("antigravity", "Antigravity CLI (agy)", true)
+        )
+
+        val visibleAgents = rawAgents.filter { (name, _, avail) ->
+            val signedIn = when (name) {
+                "codex" -> cliAuthStatus.codex.signedIn
+                "claude" -> cliAuthStatus.claude.signedIn
+                "antigravity" -> cliAuthStatus.agy.signedIn
+                else -> false
+            }
+            avail && (!isEmbeddedRuntime || (cliAuthStatus.loaded && signedIn))
+        }
+
+        LaunchedEffect(visibleAgents, selectedAgent) {
+            if (visibleAgents.isNotEmpty() && visibleAgents.none { it.first == selectedAgent }) {
+                onSelectAgent(visibleAgents.first().first)
+                onSelectModel("default")
+            }
+        }
+
         Row(
             Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text("Agent:", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
-            val fallback = listOf(
-                Triple("codex", "Codex", true),
-                Triple("claude", "Claude", true),
-                Triple("opencode", "OpenCode", true)
-            )
-            val list = if (agents.isNotEmpty()) agents.map {
-                Triple(it.optString("name"), it.optString("display_name"), it.optBoolean("available", true))
-            } else fallback
-
-            list.forEach { (name, label, avail) ->
-                FilterChip(
-                    selected = selectedAgent == name,
-                    onClick = {
-                        onSelectAgent(name)
-                        onSelectModel("default")
-                    },
-                    label = { Text(if (avail) label else "$label (offline)") },
-                    leadingIcon = if (selectedAgent == name) {
-                        { Icon(Icons.Default.Check, null, Modifier.size(14.dp)) }
-                    } else null
-                )
+            if (visibleAgents.isEmpty()) {
+                if (isEmbeddedRuntime && !cliAuthStatus.loaded) {
+                    Text("Checking signed-in agents...", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+                } else {
+                    SuggestionChip(
+                        onClick = onOpenSettings,
+                        label = { Text("No signed-in agent — Sign in in Settings", style = MaterialTheme.typography.labelSmall) }
+                    )
+                }
+            } else {
+                visibleAgents.forEach { (name, label, _) ->
+                    FilterChip(
+                        selected = selectedAgent == name,
+                        onClick = {
+                            onSelectAgent(name)
+                            onSelectModel("default")
+                        },
+                        label = { Text(label) },
+                        leadingIcon = if (selectedAgent == name) {
+                            { Icon(Icons.Default.Check, null, Modifier.size(14.dp)) }
+                        } else null
+                    )
+                }
             }
         }
-        val currAgentObj = agents.firstOrNull { it.optString("name") == selectedAgent }
+        val isSelectedVisible = visibleAgents.any { it.first == selectedAgent }
+        val currAgentObj = if (isSelectedVisible) agents.firstOrNull { it.optString("name") == selectedAgent } else null
         val models = currAgentObj?.optJSONArray("models")?.let { arr -> (0 until arr.length()).map { arr.getString(it) } } ?: emptyList()
         if (models.size > 1) {
             Spacer(Modifier.height(4.dp))
@@ -692,7 +811,7 @@ private fun AgentScreen(prompt: String, onPrompt: (String) -> Unit, mode: String
                     }
                     onSend()
                 },
-                enabled = canRun && prompt.isNotBlank()
+                enabled = canRun && prompt.isNotBlank() && isSelectedVisible
             ) {
                 Icon(Icons.AutoMirrored.Filled.Send, null, Modifier.size(17.dp))
                 Spacer(Modifier.width(5.dp))
@@ -966,8 +1085,10 @@ private fun SettingsScreen(
     var instructionContent by remember { mutableStateOf("") }
     var instructionFile by remember { mutableStateOf("AGENTS.md") }
     var loadingInstructions by remember { mutableStateOf(false) }
+    var codexProotBypass by remember { mutableStateOf(false) }
+    var savingSecurity by remember { mutableStateOf(false) }
 
-    LaunchedEffect(selectedProject, section) {
+    LaunchedEffect(selectedProject, section, online) {
         if (section == 2 && selectedProject.isNotBlank() && api != null) {
             loadingInstructions = true
             runCatching {
@@ -976,6 +1097,12 @@ private fun SettingsScreen(
                 instructionContent = res.optString("content", "")
             }.onFailure { notify(it) }
             loadingInstructions = false
+        }
+        if (section == 3 && online && api != null) {
+            runCatching {
+                val s = api.settings()
+                codexProotBypass = s.optBoolean("codex_proot_sandbox_bypass", false)
+            }
         }
     }
 
@@ -1227,6 +1354,48 @@ private fun SettingsScreen(
 
             3 -> {
                 Text("Security Policies & Sandboxing", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Surface(
+                    color = if (codexProotBypass) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.surfaceVariant,
+                    shape = MaterialTheme.shapes.medium,
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                ) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    "Codex Build in Embedded PRoot (Disable Linux Sandbox)",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (codexProotBypass) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Spacer(Modifier.height(2.dp))
+                                Text(
+                                    "Opt-in (OFF by default): Android PRoot blocks Linux bubblewrap/Landlock namespaces needed by Codex workspace-write. Enabling this passes --sandbox danger-full-access ONLY for Codex Build tasks inside PRoot; Plan tasks remain read-only.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (codexProotBypass) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Spacer(Modifier.width(8.dp))
+                            Switch(
+                                checked = codexProotBypass,
+                                enabled = online && api != null && !savingSecurity,
+                                onCheckedChange = { checked ->
+                                    if (api == null) return@Switch
+                                    savingSecurity = true
+                                    scope.launch {
+                                        runCatching { api.updateSettings(checked) }
+                                            .onSuccess { res ->
+                                                codexProotBypass = res.optBoolean("codex_proot_sandbox_bypass", checked)
+                                                notify(Throwable(if (codexProotBypass) "Enabled Codex Build PRoot opt-in (--sandbox danger-full-access)" else "Restored default Codex workspace-write sandbox"))
+                                            }
+                                            .onFailure { notify(it) }
+                                        savingSecurity = false
+                                    }
+                                }
+                            )
+                        }
+                    }
+                }
                 listOf(
                     Pair("Loopback Only", "All bridge communication binds exclusively to 127.0.0.1:8765. Remote network listeners and 0.0.0.0 bindings are strictly rejected."),
                     Pair("Android KeyStore Encryption", "The device token is encrypted at rest using AES-256 GCM authenticated cryptography in the Android KeyStore hardware module."),

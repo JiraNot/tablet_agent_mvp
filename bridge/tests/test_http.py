@@ -56,4 +56,21 @@ class ApiTests(unittest.TestCase):
             self.assertTrue(data['ok'])
             self.assertIn(data.get('runtime'), {'termux', 'embedded'})
 
+    def test_settings_codex_proot_opt_in_and_validation(self):
+        st, data = self.call('GET', '/v1/settings')
+        self.assertEqual(st, 200)
+        self.assertFalse(data['codex_proot_sandbox_bypass'])
+
+        with self.assertRaises(HTTPError) as e:
+            self.call('PUT', '/v1/settings', {'codex_proot_sandbox_bypass': 'yes'})
+        self.assertEqual(e.exception.code, 400)
+
+        st2, updated = self.call('PUT', '/v1/settings', {'codex_proot_sandbox_bypass': True})
+        self.assertEqual(st2, 200)
+        self.assertTrue(updated['codex_proot_sandbox_bypass'])
+
+        st3, fetched = self.call('GET', '/v1/settings')
+        self.assertEqual(st3, 200)
+        self.assertTrue(fetched['codex_proot_sandbox_bypass'])
+
 if __name__=='__main__':unittest.main()
