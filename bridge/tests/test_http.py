@@ -38,5 +38,15 @@ class ApiTests(unittest.TestCase):
     def test_reject_untrusted_git_host(self):
         with self.assertRaises(HTTPError) as e:self.call('POST','/v1/projects',{'name':'x','git_url':'https://evil.invalid/x/y'})
         self.assertEqual(e.exception.code,400)
+    def test_project_instructions_get_and_put(self):
+        self.call('POST', '/v1/projects', {'name': 'ins_proj'})
+        st, res = self.call('GET', '/v1/projects/ins_proj/instructions')
+        self.assertEqual(res['file'], 'AGENTS.md')
+        self.assertEqual(res['content'], '')
+        st, res2 = self.call('PUT', '/v1/projects/ins_proj/instructions', {'content': '# Guidelines\n- Rule 1'})
+        self.assertEqual(res2['path'], 'AGENTS.md')
+        st, res3 = self.call('GET', '/v1/projects/ins_proj/instructions')
+        self.assertEqual(res3['file'], 'AGENTS.md')
+        self.assertIn('Rule 1', res3['content'])
 
 if __name__=='__main__':unittest.main()

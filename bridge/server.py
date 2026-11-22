@@ -86,6 +86,11 @@ class Handler(BaseHTTPRequestHandler):
                 rel=q.get('path',[''])[0]
                 if method=='GET':return self.reply(200,self.core.read_file(name,rel))
                 if method=='PUT':return self.reply(200,self.core.write_file(name,rel,str(self._body().get('content',''))))
+            if len(seg)==4 and seg[3]=='instructions':
+                if method=='GET':
+                    return self.reply(200,self.core.project_instructions(name))
+                if method=='PUT':
+                    return self.reply(200,self.core.save_project_instructions(name,str(self._body().get('content',''))))
             if len(seg)==5 and seg[3]=='git':
                 if seg[4]=='status' and method=='GET':
                     return self.reply(200,self.core.git_status(name))

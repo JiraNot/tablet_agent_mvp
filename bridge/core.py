@@ -562,8 +562,19 @@ class LocalCore:
         policy = ('Plan only. Do not edit files or run mutating commands. Provide concise steps and test strategy.'
                   if mode=='plan' else
                   'You may edit files under the current workspace. Keep changes scoped; run relevant tests. Never read or disclose .env files, keys, or credentials. Do not git push or deploy. Explain what changed and tests actually executed.')
+        instructions = ''
+        for ins_name in ['AGENTS.md', 'CLAUDE.md', '.agents.md']:
+            ins_p = project_path / ins_name
+            if ins_p.is_file():
+                try:
+                    raw_ins = ins_p.read_text(encoding='utf-8')[:4000]
+                    clean_ins = REDACTION.sub('[REDACTED]', raw_ins)
+                    instructions = f'\n\nProject Instructions ({ins_name}):\n{clean_ins}'
+                    break
+                except Exception:
+                    pass
         thread = self._thread_for_project(rec['project'], agent_name)
-        cmd = adapter.build_cmd(project_path, f'{policy}\n\nUser task:\n{rec["prompt"]}', mode, thread, model)
+        cmd = adapter.build_cmd(project_path, f'{policy}{instructions}\n\nUser task:\n{rec["prompt"]}', mode, thread, model)
         try:
             rc, output=self._run(task_id,cmd,project_path,timeout=1800,phase='agent')
             if self.task(task_id)['status']=='CANCELLED': return
@@ -718,3 +729,17 @@ class LocalCore:
             raise
         except Exception as e:
             raise BridgeError(f'Git commit error: {e}')
+
+    def project_instructions(self, project: str) -> dict[str, Any]:
+        base = self._project(project)
+        for name in ['AGENTS.md', 'CLAUDE.md']:
+            f = base / name
+            if f.is_file():
+                try:
+                    return {'file': name, 'content': f.read_text(encoding='utf-8')[:64000]}
+                except Exception:
+                    pass
+        return {'file': 'AGENTS.md', 'content': ''}
+
+    def save_project_instructions(self, project: str, content: str) -> dict[str, Any]:
+        return self.write_file(project, 'AGENTS.md', content)

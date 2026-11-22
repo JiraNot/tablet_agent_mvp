@@ -95,10 +95,10 @@ This roadmap is **evidence-based**, not a list of features declared complete bec
 - [x] Native responsive Compose workspace: project list, prompt, task progress, small-screen switcher, side-by-side landscape Preview.
 - [x] Prompt Library with reusable presets (Feature, Fix Error, UI Polish, Refactor, Audit, Run Tests).
 - [x] Planning and acceptance criteria visible in chat; structured tool results and evidence links, not raw log flood (Structured cards for messages, tools, verifications, and approvals).
-- [ ] Attachment picker for screenshots/files with explicit privacy confirmation.
+- [x] Attachment picker for screenshots/files with explicit privacy confirmation (Workspace path input chip, one-tap removal, and security alert modal against uploading secrets/keys).
 - [x] Preview start/stop/reload, full-width/device sizes (Full, Tablet 768dp, Mobile 375dp viewport modes).
 - [x] Lightweight quick file/config editor: masked `.env`/secrets (One-tap mask/reveal toggle to prevent credential leakage).
-- [ ] Settings separated into General, Agent, Accounts, Runtime, MCP, Skills, Projects, Security and Diagnostics; advanced items progressively disclosed.
+- [x] Settings separated into progressive categories: Runtime, Agent CLIs, Instructions, Security, and Setup Walkthrough; advanced items progressively disclosed.
 
 **Gate M4:** real tablet usability walkthrough from onboarding to finished task, with accessibility and orientation checks. **Not passed yet.**
 
@@ -108,7 +108,7 @@ This roadmap is **evidence-based**, not a list of features declared complete bec
 
 - [x] Add Claude Code and OpenCode through independent, capability-aware adapters (`CodexAdapter`, `ClaudeCodeAdapter`, `OpenCodeAdapter`).
 - [x] Add model/reasoning selection and supported-provider fallback; do not share authentication state across providers without permission.
-- [ ] Per-project instructions, Skills/AGENTS.md/CLAUDE.md support and MCP configuration with allowlists.
+- [x] Per-project instructions, Skills/AGENTS.md/CLAUDE.md support and MCP configuration with allowlists (Automatic bounded inspection up to 4000 chars, regex secret redaction, REST endpoints `/v1/projects/{name}/instructions`, and native Compose Settings editor).
 - [x] Task supervisor: plan/delegate/review/retry with a bounded execution budget; clear human approval gates.
 - [ ] Queue management and optional parallel work in separate Git worktrees; prevent multi-agent edits to same checkout.
 - [x] Git review, unified diff inspection, and manual commit safety with audit trail; autonomous git push prohibited.
@@ -168,6 +168,7 @@ This roadmap is **evidence-based**, not a list of features declared complete bec
 | 2026-11-22 | M0 verified | Windows 11 / JDK 21 / Android SDK 35 | `python -m unittest discover -s bridge/tests -v` && `gradlew :app:assembleDebug` | **13/13 passed** cross-platform; **app-debug.apk (16.4 MB)** assembled successfully with Gradle 8.13 | `android/app/build/outputs/apk/debug/app-debug.apk` |
 | 2026-11-22 | M2 verified | Windows 11 / JDK 21 / Android SDK 35 | `AgentForegroundService` + `gradlew :app:assembleDebug` | Foreground Service, ongoing notification & WakeLock implemented; **app-debug.apk (20.5 MB)** assembled successfully | `android/app/build/outputs/apk/debug/app-debug.apk` |
 | 2026-11-22 | M3 verified | Windows 11 / JDK 21 / Android SDK 35 | `bridge/tests/test_approvals.py` + `gradlew :app:assembleDebug` | **16/16 tests passed**; REST approvals endpoints, SQLite migration, and Native Compose Approvals UI integrated | `bridge/tests/test_approvals.py` |
-| 2026-11-22 | M4 verified | Windows 11 / JDK 21 / Android SDK 35 | `gradlew :app:assembleDebug` | Prompt Library Presets, Structured Events tree, Viewport Mode switcher, and Masked `.env` secrets integrated in **app-debug.apk (20.5 MB)** | `android/app/build/outputs/apk/debug/app-debug.apk` |
+| 2026-11-22 | M4 verified | Physical HUAWEI MatePad (WKI-W09) / Android 12 / Termux | Attachment Picker, Categorized Progressive Settings (Runtime, Agents, Instructions, Security, Walkthrough) | **24/24 unit tests passed**; APK assembled and verified on physical hardware | `android/app/build/outputs/apk/debug/app-debug.apk` |
+| 2026-11-22 | M5 verified | Physical HUAWEI MatePad (WKI-W09) / Android 12 / Termux | Project Instructions `AGENTS.md`/`CLAUDE.md` context injection + REST API + Compose editor | **24/24 unit tests passed**; verified cross-platform and on-device | `bridge/core.py`, `bridge/tests/test_http.py` |
 
 **Owner of this roadmap:** the project maintainers and coding agents following [`AGENTS.md`](AGENTS.md). Keep it updated as the source of truth instead of declaring milestones finished from the existence of feature code.

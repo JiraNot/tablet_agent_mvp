@@ -24,6 +24,8 @@
 | GET | `/v1/projects/{name}/preview` | local process state/url |
 | POST | `/v1/projects/{name}/preview/start` | run npm dev, optional `{port}` |
 | POST | `/v1/projects/{name}/preview/stop` | terminate dev process |
+| GET | `/v1/projects/{name}/instructions` | get AGENTS.md or CLAUDE.md instructions content |
+| PUT | `/v1/projects/{name}/instructions` | `{content}`, update project AGENTS.md instructions |
 
 Local-only port 8765; preview default port 3000 (Next) or 5173 (Vite). A project might require custom scripts/ports. No remote API and no external shell command endpoint.
 

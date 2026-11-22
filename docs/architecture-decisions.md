@@ -36,3 +36,11 @@ Reason: Different agents use different parameters and flags. Standardizing capab
 ### ADR-009 — Explicit Git Review and Commit Safety
 Decision: Provide read-only `/v1/projects/{name}/git/status` and `/v1/projects/{name}/git/diff` endpoints, with mutating `/v1/projects/{name}/git/commit` restricted to explicit user-triggered actions. Never allow agents to push or commit autonomously.
 Reason: Users must retain complete authority over Git version control and repository history. Preventing unprompted agent commits or pushes protects against unwanted destructive repository overwrites.
+
+### ADR-010 — Per-Project Instructions and Context Injection (AGENTS.md / CLAUDE.md)
+Decision: Automatically discover and inject repository instructions from `AGENTS.md` or `CLAUDE.md` in the workspace root into the agent execution prompt, bounded to 4000 characters with regex credential redaction. Expose `/v1/projects/{name}/instructions` for direct inspection and edits.
+Reason: Development standards, test conventions, and architecture contracts are frequently defined in repository root markdown files. Injecting them ensures consistent compliance without manual user retyping.
+
+### ADR-011 — Progressive Disclosure Settings Hierarchy
+Decision: Reorganize Settings into distinct tabbed/categorized cards: General & Layout, Agents & Runtime, Projects & Instructions, Security & Secrets, and Diagnostics & Health.
+Reason: Prevents UI cognitive overload on tablet touchscreens while enabling rapid diagnostic inspection and credential rotation without navigating desktop-like configuration trees.

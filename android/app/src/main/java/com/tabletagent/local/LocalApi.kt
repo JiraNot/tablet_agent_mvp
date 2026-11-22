@@ -62,6 +62,8 @@ class LocalApi(private val deviceToken: String) {
     suspend fun gitStatus(project: String): JSONObject = request("GET", "/v1/projects/${encode(project)}/git/status")
     suspend fun gitDiff(project: String): JSONObject = request("GET", "/v1/projects/${encode(project)}/git/diff")
     suspend fun gitCommit(project: String, message: String): JSONObject = request("POST", "/v1/projects/${encode(project)}/git/commit", JSONObject().put("message", message))
+    suspend fun projectInstructions(project: String): JSONObject = request("GET", "/v1/projects/${encode(project)}/instructions")
+    suspend fun saveProjectInstructions(project: String, content: String): JSONObject = request("PUT", "/v1/projects/${encode(project)}/instructions", JSONObject().put("content", content))
     suspend fun previewStatus(project: String): JSONObject = request("GET", "/v1/projects/${encode(project)}/preview")
     suspend fun previewStart(project: String): JSONObject = request("POST", "/v1/projects/${encode(project)}/preview/start", JSONObject())
     suspend fun previewStop(project: String): JSONObject = request("POST", "/v1/projects/${encode(project)}/preview/stop", JSONObject())

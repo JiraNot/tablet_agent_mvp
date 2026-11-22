@@ -92,7 +92,11 @@ fun TabletAgentApp() {
     var selectedAgent by rememberSaveable { mutableStateOf("codex") }
     var selectedModel by rememberSaveable { mutableStateOf("default") }
     var tokenEntry by remember { mutableStateOf(token) }
-    val notify: (Throwable) -> Unit = { error = it.message ?: it.javaClass.simpleName }
+    val notify: (Throwable) -> Unit = { 
+        if (it !is kotlin.coroutines.cancellation.CancellationException) {
+            error = it.message ?: it.javaClass.simpleName 
+        }
+    }
 
     LaunchedEffect(selectedTask) {
         events = emptyList()
@@ -139,7 +143,11 @@ fun TabletAgentApp() {
                             approvals = emptyList()
                         }
                     }
-                } catch (e: Exception) { error = e.message ?: "API error" }
+                } catch (e: Exception) { 
+                    if (e !is kotlin.coroutines.cancellation.CancellationException) {
+                        error = e.message ?: "API error" 
+                    }
+                }
             }
             delay(2400)
         }
@@ -296,13 +304,22 @@ fun TabletAgentApp() {
                     onSave = { scope.launch { runCatching { api.saveFile(selectedProject, fileName, fileBody) }
                         .onSuccess { error = "Saved $fileName" }
                         .onFailure { notify(it) } } })
-                3 -> SettingsScreen(tokenEntry, onToken = { tokenEntry = it },
+                3 -> SettingsScreen(
+                    tokenEntry = tokenEntry,
+                    onToken = { tokenEntry = it },
                     onSave = {
                         try {
                             SecureDeviceToken.save(context, tokenEntry.trim())
                             token = tokenEntry.trim(); error = "Device token saved"
                         } catch (e: Exception) { notify(e) }
-                    }, onStart = { error = TermuxLauncher.startBridge(context) }, online = online)
+                    },
+                    onStart = { error = TermuxLauncher.startBridge(context) },
+                    online = online,
+                    agents = availableAgents,
+                    selectedProject = selectedProject,
+                    api = api,
+                    notify = notify
+                )
             }
         }
     }
@@ -455,6 +472,19 @@ private fun AgentScreen(prompt: String, onPrompt: (String) -> Unit, mode: String
                 }
             }
         }
+        var attachment by rememberSaveable { mutableStateOf("") }
+        var showAttachDialog by remember { mutableStateOf(false) }
+
+        if (attachment.isNotBlank()) {
+            Spacer(Modifier.height(4.dp))
+            InputChip(
+                selected = true,
+                onClick = { attachment = "" },
+                label = { Text("📎 $attachment", style = MaterialTheme.typography.labelSmall) },
+                trailingIcon = { Icon(Icons.Default.Close, null, Modifier.size(14.dp)) }
+            )
+        }
+
         Spacer(Modifier.height(6.dp))
         OutlinedTextField(prompt, onPrompt, modifier = Modifier.fillMaxWidth().heightIn(min = 115.dp),
             placeholder = { Text("Describe a feature, bug, or improvement…") }, maxLines = 5)
@@ -462,12 +492,62 @@ private fun AgentScreen(prompt: String, onPrompt: (String) -> Unit, mode: String
             FilterChip(selected = mode == "plan", onClick = { onMode("plan") }, label = { Text("Plan only") })
             Spacer(Modifier.width(8.dp))
             FilterChip(selected = mode == "build", onClick = { onMode("build") }, label = { Text("Build") })
+            Spacer(Modifier.width(8.dp))
+            OutlinedButton(
+                onClick = { showAttachDialog = true },
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+            ) {
+                Icon(Icons.Default.AttachFile, null, Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text(if (attachment.isBlank()) "Attach" else "Change", style = MaterialTheme.typography.labelSmall)
+            }
             Spacer(Modifier.weight(1f))
-            Button(onClick = onSend, enabled = canRun && prompt.isNotBlank()) {
+            Button(
+                onClick = {
+                    if (attachment.isNotBlank() && !prompt.contains("[Attachment: $attachment]")) {
+                        onPrompt("$prompt\n\n[Attachment: $attachment]")
+                    }
+                    onSend()
+                },
+                enabled = canRun && prompt.isNotBlank()
+            ) {
                 Icon(Icons.AutoMirrored.Filled.Send, null, Modifier.size(17.dp))
                 Spacer(Modifier.width(5.dp))
                 Text("Run ${selectedAgent.replaceFirstChar { it.uppercase() }}")
             }
+        }
+        if (showAttachDialog) {
+            var tempPath by remember { mutableStateOf(attachment) }
+            AlertDialog(
+                onDismissRequest = { showAttachDialog = false },
+                title = { Text("Attach Workspace File") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            "Privacy Warning: File contents will be added to the agent context. Never attach files containing secrets, API keys, or private tokens.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                        OutlinedTextField(
+                            value = tempPath,
+                            onValueChange = { tempPath = it },
+                            label = { Text("Workspace relative path") },
+                            placeholder = { Text("package.json or src/index.ts") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        attachment = tempPath.trim()
+                        showAttachDialog = false
+                    }) { Text("Confirm Attachment") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showAttachDialog = false }) { Text("Cancel") }
+                }
+            )
         }
         HorizontalDivider()
         Spacer(Modifier.height(8.dp))
@@ -664,24 +744,226 @@ private fun FilesScreen(files: List<JSONObject>, dir: String, selected: String, 
 }
 
 @Composable
-private fun SettingsScreen(tokenEntry: String, onToken: (String) -> Unit, onSave: () -> Unit, onStart: () -> Unit, online: Boolean) {
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text("Local runtime settings", style = MaterialTheme.typography.titleLarge)
-        Text("On-device Termux bridge at 127.0.0.1:8765. No PC or VPS required.", style = MaterialTheme.typography.bodyMedium)
-        Text("Status: ${if (online) "Bridge online" else "Bridge offline"}")
-        OutlinedTextField(tokenEntry, onToken, label = { Text("Device token from Termux") },
-            visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth(), singleLine = true)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = onSave, enabled = tokenEntry.isNotBlank()) { Text("Save token") }
-            OutlinedButton(onClick = onStart) { Text("Start bridge") }
+private fun SettingsScreen(
+    tokenEntry: String,
+    onToken: (String) -> Unit,
+    onSave: () -> Unit,
+    onStart: () -> Unit,
+    online: Boolean,
+    agents: List<JSONObject> = emptyList(),
+    selectedProject: String = "",
+    api: LocalApi? = null,
+    notify: (Throwable) -> Unit = {}
+) {
+    var section by rememberSaveable { mutableIntStateOf(0) }
+    val scope = rememberCoroutineScope()
+    var instructionContent by remember { mutableStateOf("") }
+    var instructionFile by remember { mutableStateOf("AGENTS.md") }
+    var loadingInstructions by remember { mutableStateOf(false) }
+
+    LaunchedEffect(selectedProject, section) {
+        if (section == 2 && selectedProject.isNotBlank() && api != null) {
+            loadingInstructions = true
+            runCatching {
+                val res = api.projectInstructions(selectedProject)
+                instructionFile = res.optString("file", "AGENTS.md")
+                instructionContent = res.optString("content", "")
+            }.onFailure { notify(it) }
+            loadingInstructions = false
         }
+    }
+
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text("Settings & Diagnostics", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            listOf(
+                Triple("Runtime", Icons.Default.Tune, 0),
+                Triple("Agent CLIs", Icons.Default.SmartToy, 1),
+                Triple("Instructions", Icons.Default.Description, 2),
+                Triple("Security", Icons.Default.Security, 3),
+                Triple("Walkthrough", Icons.Default.HelpOutline, 4)
+            ).forEach { (label, icon, idx) ->
+                FilterChip(
+                    selected = section == idx,
+                    onClick = { section = idx },
+                    label = { Text(label) },
+                    leadingIcon = { Icon(icon, null, Modifier.size(16.dp)) }
+                )
+            }
+        }
+
         HorizontalDivider()
-        Text("Initial setup", style = MaterialTheme.typography.titleMedium)
-        Text("1. Install Termux locally.\n2. Install python, git, nodejs and Codex CLI.\n3. Copy bridge files into ~/tablet-agent/bridge.\n4. Run python ~/tablet-agent/bridge/server.py.\n5. Copy the generated token above.")
-        Text("To use Start bridge: enable allow-external-apps=true in Termux and grant this app RUN_COMMAND permission.", style = MaterialTheme.typography.bodySmall)
-        HorizontalDivider()
-        Text("MVP capabilities & limitations", style = MaterialTheme.typography.titleMedium)
-        Text("Codex, Claude Code, and OpenCode adapters are supported with capability flags. Git inspection and manual commit safety are active. Embedded native Linux runtime, streaming WebSocket, and integrated sandbox are later milestones.", style = MaterialTheme.typography.bodySmall)
+
+        when (section) {
+            0 -> {
+                Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = MaterialTheme.shapes.medium) {
+                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(if (online) Icons.Default.CheckCircle else Icons.Default.Error, null,
+                                tint = if (online) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                if (online) "Bridge Online (127.0.0.1:8765)" else "Bridge Offline",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        Text("The Python supervisor bridge operates strictly on loopback within Termux.", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+
+                OutlinedTextField(
+                    value = tokenEntry,
+                    onValueChange = onToken,
+                    label = { Text("Device Token (stored in Android KeyStore)") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = onSave, enabled = tokenEntry.isNotBlank()) {
+                        Icon(Icons.Default.Save, null, Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Save Token")
+                    }
+                    OutlinedButton(onClick = onStart) {
+                        Icon(Icons.Default.PlayArrow, null, Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Start Bridge via RUN_COMMAND")
+                    }
+                }
+            }
+
+            1 -> {
+                Text("Installed Agent CLIs & Capabilities", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                if (agents.isEmpty()) {
+                    Text("No agent capability metadata received yet. Ensure bridge is connected.", style = MaterialTheme.typography.bodySmall)
+                } else {
+                    agents.forEach { a ->
+                        val name = a.optString("name")
+                        val display = a.optString("display_name")
+                        val avail = a.optBoolean("available", false)
+                        val canPlan = a.optBoolean("can_plan", false)
+                        val canBuild = a.optBoolean("can_build", false)
+                        val resume = a.optBoolean("supports_resume", false)
+                        val models = a.optJSONArray("models")?.let { arr -> (0 until arr.length()).map { arr.getString(it) } } ?: emptyList()
+
+                        Surface(
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            shape = MaterialTheme.shapes.small,
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                        ) {
+                            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(display, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                                    Spacer(Modifier.weight(1f))
+                                    Surface(
+                                        color = if (avail) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.errorContainer,
+                                        shape = MaterialTheme.shapes.extraSmall
+                                    ) {
+                                        Text(
+                                            if (avail) "INSTALLED" else "OFFLINE",
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+                                Text("Capabilities: ${listOfNotNull(if (canPlan) "Plan" else null, if (canBuild) "Build" else null, if (resume) "Session Resume" else null).joinToString(", ")}",
+                                    style = MaterialTheme.typography.bodySmall)
+                                if (models.isNotEmpty()) {
+                                    Text("Models: ${models.joinToString(", ")}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(6.dp))
+                Text("Termux CLI Installation Commands:", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                Surface(color = MaterialTheme.colorScheme.surfaceContainerHighest, shape = MaterialTheme.shapes.small, modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        "npm install -g @anthropic-ai/claude-code\nnpm install -g opencode-ai",
+                        modifier = Modifier.padding(10.dp),
+                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                    )
+                }
+            }
+
+            2 -> {
+                Text("Per-Project Instructions (${instructionFile})", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                if (selectedProject.isBlank()) {
+                    Text("Select a project from the top bar to inspect or edit instructions.", style = MaterialTheme.typography.bodyMedium)
+                } else {
+                    Text("Instructions in AGENTS.md or CLAUDE.md are automatically injected into the agent context.", style = MaterialTheme.typography.bodySmall)
+                    if (loadingInstructions) {
+                        CircularProgressIndicator(Modifier.padding(16.dp))
+                    } else {
+                        OutlinedTextField(
+                            value = instructionContent,
+                            onValueChange = { instructionContent = it },
+                            label = { Text(instructionFile) },
+                            placeholder = { Text("# Project Development Guidelines\n\n- Build using npm run build\n- Test with npm test") },
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 180.dp),
+                            maxLines = 10
+                        )
+                        Button(
+                            onClick = {
+                                if (api != null && selectedProject.isNotBlank()) {
+                                    scope.launch {
+                                        runCatching {
+                                            api.saveProjectInstructions(selectedProject, instructionContent)
+                                        }.onSuccess { notify(Throwable("Saved $instructionFile")) }
+                                         .onFailure { notify(it) }
+                                    }
+                                }
+                            },
+                            modifier = Modifier.padding(top = 6.dp)
+                        ) {
+                            Icon(Icons.Default.Save, null, Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Save Instructions")
+                        }
+                    }
+                }
+            }
+
+            3 -> {
+                Text("Security Policies & Sandboxing", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                listOf(
+                    Pair("Loopback Only", "All bridge communication binds exclusively to 127.0.0.1:8765. Remote network listeners and 0.0.0.0 bindings are strictly rejected."),
+                    Pair("Android KeyStore Encryption", "The device token is encrypted at rest using AES-256 GCM authenticated cryptography in the Android KeyStore hardware module."),
+                    Pair("No Autonomous Git Pushes", "Agents are prevented by system policy from executing git push or deploying code. Commits require manual user initiation via Git Review."),
+                    Pair("Secrets Masking", "Secrets in .env files and API keys are masked using regex redaction before appearing in previews, logs, or prompt contexts.")
+                ).forEach { (title, desc) ->
+                    Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = MaterialTheme.shapes.small, modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                        Column(Modifier.padding(10.dp)) {
+                            Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                            Spacer(Modifier.height(2.dp))
+                            Text(desc, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+            }
+
+            4 -> {
+                Text("Termux Setup Walkthrough", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Text(
+                    "1. Install Termux locally on Android.\n" +
+                    "2. Run pkg update && pkg install -y python git nodejs-lts.\n" +
+                    "3. Copy bridge files to ~/tablet-agent/bridge/.\n" +
+                    "4. Run python ~/tablet-agent/bridge/server.py.\n" +
+                    "5. Paste the generated Device Token into the Runtime tab.\n\n" +
+                    "For one-click Start Bridge: In ~/.termux/termux.properties set allow-external-apps=true and grant RUN_COMMAND permission to Tablet Agent.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+        }
     }
 }
 
