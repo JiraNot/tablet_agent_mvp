@@ -46,6 +46,7 @@ class LocalCore:
         self.procs: dict[str, subprocess.Popen] = {}
         self.thread_candidates: dict[str, str] = {}
         self.previews: dict[str, dict[str, Any]] = {}
+        self.approval_events: dict[str, threading.Event] = {}
         self._init_db()
         self._recover_interrupted()
 
@@ -93,6 +94,13 @@ class LocalCore:
                 timestamp REAL NOT NULL, kind TEXT NOT NULL, message TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_events_task_seq ON events(task_id, seq);
+            CREATE TABLE IF NOT EXISTS approvals(
+                id TEXT PRIMARY KEY, task_id TEXT NOT NULL,
+                type TEXT NOT NULL, target TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'PENDING',
+                created_at REAL NOT NULL, resolved_at REAL
+            );
+            CREATE INDEX IF NOT EXISTS idx_approvals_task_status ON approvals(task_id, status);
             ''')
 
     def _recover_interrupted(self):
@@ -253,7 +261,7 @@ class LocalCore:
         # Prevent concurrent agents from editing the same project, including queued jobs.
         with self.lock:
             with self._db() as db:
-                busy=db.execute("SELECT id FROM tasks WHERE project=? AND status IN ('QUEUED','PLANNING','EXECUTING','VERIFYING','REPAIRING') LIMIT 1", (project,)).fetchone()
+                busy=db.execute("SELECT id FROM tasks WHERE project=? AND status IN ('QUEUED','PLANNING','WAITING_APPROVAL','EXECUTING','VERIFYING','REPAIRING') LIMIT 1", (project,)).fetchone()
                 if busy:
                     raise BridgeError('Another task is active in this project; finish or cancel it first', 409)
                 db.execute('INSERT INTO tasks(id,project,prompt,agent,mode,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)', (task_id,project,prompt,agent,mode,'QUEUED',now,now))
@@ -263,7 +271,9 @@ class LocalCore:
 
     def _run(self, task_id: str, cmd: list[str], cwd: Path, timeout: float, phase: str) -> tuple[int,str]:
         self.append(task_id,'log',f'Starting {phase}: {cmd[0]} (arguments hidden)')
-        proc = subprocess.Popen(cmd, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        exec_cmd = shutil.which(cmd[0]) or cmd[0]
+        actual_cmd = [exec_cmd] + cmd[1:]
+        proc = subprocess.Popen(actual_cmd, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True, errors='replace', bufsize=1,
                                 start_new_session=True)
         with self.lock:
@@ -299,6 +309,12 @@ class LocalCore:
                                     lines.append(msg[:1500]); self.append(task_id,'message',msg)
                             elif item.get('type') in {'command_execution','file_change'}:
                                 self.append(task_id,'tool',f"{item.get('type')}: {item.get('status','')}")
+                        elif kind in {'approval_request', 'request_approval'}:
+                            action_type = data.get('action_type', data.get('tool', 'command_execution'))
+                            target_cmd = data.get('target', data.get('command', ''))
+                            allowed = self.request_approval(task_id, action_type, target_cmd)
+                            if not allowed:
+                                lines.append(f'Approval denied for: {target_cmd}')
                         elif kind=='turn.completed':
                             done_marker=True
                         elif kind in {'turn.failed','error'}:
@@ -321,20 +337,108 @@ class LocalCore:
 
     def _kill(self, proc: subprocess.Popen):
         if proc.poll() is not None: return
-        try: os.killpg(proc.pid, signal.SIGTERM)
-        except ProcessLookupError: return
+        try:
+            if hasattr(os, 'killpg'):
+                os.killpg(proc.pid, signal.SIGTERM)
+            else:
+                proc.terminate()
+        except (ProcessLookupError, OSError): return
         try: proc.wait(timeout=2)
         except subprocess.TimeoutExpired:
-            try: os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError: pass
+            try:
+                if hasattr(os, 'killpg'):
+                    os.killpg(proc.pid, signal.SIGKILL)
+                else:
+                    proc.kill()
+            except (ProcessLookupError, OSError): pass
 
     def cancel(self, task_id: str):
         rec=self.task(task_id)
         if rec['status'] in TERMINAL: return rec
         self.set_status(task_id,'CANCELLED')
-        with self.lock: proc=self.procs.get(task_id)
+        with self.lock:
+            proc=self.procs.get(task_id)
+            with self._db() as db:
+                for r in db.execute("SELECT id FROM approvals WHERE task_id=? AND status='PENDING'", (task_id,)):
+                    evt = self.approval_events.get(r['id'])
+                    if evt: evt.set()
+                db.execute("UPDATE approvals SET status='DENIED', resolved_at=? WHERE task_id=? AND status='PENDING'", (time.time(), task_id))
         if proc: self._kill(proc)
         return self.task(task_id)
+
+    def request_approval(self, task_id: str, action_type: str, target: str, timeout: float = 120.0) -> bool:
+        rec = self.task(task_id)
+        if rec['status'] in TERMINAL:
+            return False
+        approval_id = str(uuid.uuid4())
+        now = time.time()
+        with self._db() as db:
+            db.execute(
+                'INSERT INTO approvals(id, task_id, type, target, status, created_at) VALUES(?,?,?,?,?,?)',
+                (approval_id, task_id, action_type, target, 'PENDING', now)
+            )
+        event = threading.Event()
+        with self.lock:
+            self.approval_events[approval_id] = event
+        self.set_status(task_id, 'WAITING_APPROVAL')
+        self.append(task_id, 'approval', json.dumps({
+            'id': approval_id,
+            'type': action_type,
+            'target': target,
+            'status': 'PENDING'
+        }))
+
+        completed = event.wait(timeout)
+        with self.lock:
+            self.approval_events.pop(approval_id, None)
+
+        with self._db() as db:
+            row = db.execute('SELECT status FROM approvals WHERE id=?', (approval_id,)).fetchone()
+            status = row['status'] if row else 'DENIED'
+
+        if not completed and status == 'PENDING':
+            status = 'DENIED'
+            with self._db() as db:
+                db.execute('UPDATE approvals SET status="DENIED", resolved_at=? WHERE id=?', (time.time(), approval_id))
+            self.append(task_id, 'log', f'Approval request timed out after {int(timeout)}s; action denied.')
+
+        allowed = (status == 'ALLOWED')
+        if self.task(task_id)['status'] not in TERMINAL:
+            self.set_status(task_id, 'PLANNING' if rec['mode'] == 'plan' else 'EXECUTING')
+        return allowed
+
+    def approvals(self, task_id: str) -> list[dict[str, Any]]:
+        self.task(task_id)
+        with self._db() as db:
+            return [dict(r) for r in db.execute('SELECT * FROM approvals WHERE task_id=? ORDER BY created_at ASC', (task_id,))]
+
+    def resolve_approval(self, task_id: str, approval_id: str, decision: str) -> dict[str, Any]:
+        self.task(task_id)
+        decision_norm = decision.strip().lower()
+        if decision_norm not in {'allow', 'deny'}:
+            raise BridgeError('Decision must be "allow" or "deny"')
+        status = 'ALLOWED' if decision_norm == 'allow' else 'DENIED'
+        now = time.time()
+        with self._db() as db:
+            row = db.execute('SELECT * FROM approvals WHERE id=? AND task_id=?', (approval_id, task_id)).fetchone()
+            if not row:
+                raise BridgeError('Approval not found', 404)
+            if row['status'] != 'PENDING':
+                return dict(row)
+            db.execute('UPDATE approvals SET status=?, resolved_at=? WHERE id=?', (status, now, approval_id))
+            updated = db.execute('SELECT * FROM approvals WHERE id=?', (approval_id,)).fetchone()
+
+        self.append(task_id, 'approval_resolved', json.dumps({
+            'id': approval_id,
+            'decision': decision_norm,
+            'status': status
+        }))
+
+        with self.lock:
+            evt = self.approval_events.get(approval_id)
+            if evt:
+                evt.set()
+        return dict(updated)
 
     def _thread_for_project(self, project: str) -> str | None:
         with self._db() as db:
@@ -407,8 +511,11 @@ class LocalCore:
                 self._remember_thread(rec['project'],task_id)
                 self.set_status(task_id,'VERIFYING')
         except Exception as exc:
-            if self.task(task_id)['status']!='CANCELLED':
-                self.set_status(task_id,'FAILED',error=f'{type(exc).__name__}: {exc}'[:1000])
+            try:
+                if self.task(task_id)['status']!='CANCELLED':
+                    self.set_status(task_id,'FAILED',error=f'{type(exc).__name__}: {exc}'[:1000])
+            except Exception:
+                pass
 
     def preview(self, project: str):
         self._project(project)
@@ -434,7 +541,8 @@ class LocalCore:
         if not 1024<=port<=65535:raise BridgeError('Port must be 1024-65535')
         env=os.environ.copy();env.update({'PORT':str(port),'HOST':'127.0.0.1','HOSTNAME':'127.0.0.1'})
         # npm respects cwd and script; no shell construction in our process.
-        proc=subprocess.Popen(['npm','run','dev'], cwd=base, env=env,
+        npm_cmd = shutil.which('npm') or 'npm'
+        proc=subprocess.Popen([npm_cmd,'run','dev'], cwd=base, env=env,
                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
                               start_new_session=True)
         with self.lock:self.previews[project]={'process':proc,'port':port}

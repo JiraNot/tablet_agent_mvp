@@ -6,7 +6,9 @@ from server import create_server
 
 class ApiTests(unittest.TestCase):
     def setUp(self):
-        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        kwargs = {'ignore_cleanup_errors': True} if sys.version_info >= (3, 10) else {}
+        self.temp = tempfile.TemporaryDirectory(**kwargs)
+        self.addCleanup(self.temp.cleanup)
         self.server,self.core=create_server(pathlib.Path(self.temp.name),0)
         self.t=threading.Thread(target=self.server.serve_forever,daemon=True);self.t.start()
         self.addCleanup(self.server.server_close);self.addCleanup(self.server.shutdown)
@@ -24,6 +26,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(status,202)
         _,items=self.call('GET','/v1/tasks?project=tablet-demo')
         self.assertTrue(any(x['id']==task['id'] for x in items['tasks']))
+        self.call('POST',f'/v1/tasks/{task["id"]}/cancel')
     def test_file_put_get_and_reject_outside(self):
         self.call('POST','/v1/projects',{'name':'p'})
         _,data=self.call('PUT','/v1/projects/p/file?path=.env',{'content':'A=1'})

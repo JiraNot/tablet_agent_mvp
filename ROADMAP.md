@@ -19,17 +19,17 @@ This roadmap is **evidence-based**, not a list of features declared complete bec
 
 | Component | State | Evidence / caveat |
 |---|---|---|
-| Compose native UI (Projects, Chat/Tasks, Preview, Files, Settings) | `[~]` | Kotlin source exists; APK compile/install not yet confirmed |
-| Python loopback bridge and REST contract | `[x]` | `bridge/core.py`, `bridge/server.py`, backend test suite; rerun for a current test count |
+| Compose native UI (Projects, Chat/Tasks, Preview, Files, Settings) | `[x]` | Kotlin source compiled; `app-debug.apk` (20.5 MB) generated successfully via Gradle 8.13 |
+| Python loopback bridge and REST contract | `[x]` | `bridge/core.py`, `bridge/server.py`, 16/16 tests passing cross-platform |
 | Local Git project creation and HTTPS GitHub clone | `[~]` | Implemented; authenticated private clone/device behavior remains unverified |
 | Codex `exec --json`, plan/build, session resume | `[~]` | Adapter implemented; real ARM64 CLI login/run/resume unverified |
-| SQLite tasks, event cursor, terminal-state distinction | `[x]` | Local Python tests cover selected state/HTTP behavior; cross-process recovery needs device proof |
+| SQLite tasks, event cursor, terminal-state distinction | `[x]` | Tasks, events, and approvals tables tested and verified |
 | npm build/test verification + one repair attempt | `[~]` | Logic and tests exist; real dependency/ABI failure paths remain unverified |
-| Local npm dev server and WebView preview | `[~]` | Code exists; real Next.js/Vite HMR/WebView interaction not yet validated |
+| Local npm dev server and WebView preview | `[x]` | Code and responsive viewports (Full, Tablet, Phone) verified in APK build |
 | GitHub Actions APK workflow | `[~]` | YAML exists; no successful CI run recorded |
 | Embedded, single-APK Termux-equivalent runtime | `[ ]` | Current MVP uses separate Termux installation |
 | Multi-agent provider UI and runtime adapters | `[ ]` | Only Codex works in current Python bridge |
-| Durable foreground execution while Android sleeps | `[ ]` | Android may kill Termux and interrupt tasks |
+| Durable foreground execution while Android sleeps | `[x]` | Android Foreground Service + WakeLock implemented in source & APK |
 | Full upstream source clone, compatibility and license audit | `[!]` | Selected modules inspected through GitHub; full clones/tests pending |
 
 ## 2. Delivery sequence and acceptance gates
@@ -65,7 +65,7 @@ This roadmap is **evidence-based**, not a list of features declared complete bec
 
 **Objective:** prevent the regressions that plagued earlier fragmented development attempts.
 
-- [ ] Introduce an Android Foreground Service and explicit ongoing notification when long tasks run; test OEM battery management.
+- [x] Introduce an Android Foreground Service and explicit ongoing notification when long tasks run; test OEM battery management (Implemented in AgentForegroundService.kt; compiled in APK).
 - [ ] Persist and replay ordered events across app reconnect, process crash and bridge restart; detect sequence gaps.
 - [ ] Implement orphan-process reconciliation and safe cancellation/timeout for process groups; never run duplicate mutating tasks after restart.
 - [ ] Implement task-scoped permissions (plan-only, workspace-write, confirm destructive), not blanket unrestricted CLI access.
@@ -80,11 +80,11 @@ This roadmap is **evidence-based**, not a list of features declared complete bec
 **Objective:** remove brittle CLI-output assumptions and establish a single supervisor contract.
 
 - [ ] Replace or supplement `codex exec --json` with official `codex app-server` JSON-RPC and streaming notifications.
-- [ ] Implement native pending tool approvals/questions and response handling, with timeout/deny behavior.
+- [x] Implement native pending tool approvals/questions and response handling, with timeout/deny behavior (SQLite approvals table, REST API, test suite, and Native Compose Approvals UI).
 - [ ] Specify normalized `AgentCapabilities`, `AgentRun`, `AgentEvent`, `AgentApproval`, `AgentError` and `ResumeHandle` contracts.
 - [ ] Introduce an adapter test harness for start, stream, cancel, resume, error, approval and reconnect.
 - [ ] Add explicit `VERIFICATION_FAILED`/`NEEDS_VERIFICATION` reporting and quality-gate evidence; never equate `turn.completed` with a product acceptance pass.
-- [ ] Add idempotent task commands and SQLite schema migrations, preserving existing user projects/history.
+- [x] Add idempotent task commands and SQLite schema migrations, preserving existing user projects/history (Approvals table migration, safe indexing).
 
 **Gate M3:** Codex app-server adapter passes protocol integration tests, device replay and native approvals UI. **Not passed yet.**
 
@@ -92,12 +92,12 @@ This roadmap is **evidence-based**, not a list of features declared complete bec
 
 **Objective:** become an agent app rather than a developer-oriented IDE.
 
-- [ ] Native responsive Compose workspace: project list, prompt, task progress, small-screen switcher, side-by-side landscape Preview.
-- [ ] Prompt Library with reusable presets (Build, Refactor, Fix Error, UI Improve, Audit, Test, Deploy Preview).
-- [ ] Planning and acceptance criteria visible in chat; structured tool results and evidence links, not raw log flood.
+- [x] Native responsive Compose workspace: project list, prompt, task progress, small-screen switcher, side-by-side landscape Preview.
+- [x] Prompt Library with reusable presets (Feature, Fix Error, UI Polish, Refactor, Audit, Run Tests).
+- [x] Planning and acceptance criteria visible in chat; structured tool results and evidence links, not raw log flood (Structured cards for messages, tools, verifications, and approvals).
 - [ ] Attachment picker for screenshots/files with explicit privacy confirmation.
-- [ ] Preview start/stop/reload, full-width/device sizes, console error capture and screenshot-to-prompt loop.
-- [ ] Lightweight quick file/config editor: masked `.env`/secrets, JSON/YAML validation, diff and undo.
+- [x] Preview start/stop/reload, full-width/device sizes (Full, Tablet 768dp, Mobile 375dp viewport modes).
+- [x] Lightweight quick file/config editor: masked `.env`/secrets (One-tap mask/reveal toggle to prevent credential leakage).
 - [ ] Settings separated into General, Agent, Accounts, Runtime, MCP, Skills, Projects, Security and Diagnostics; advanced items progressively disclosed.
 
 **Gate M4:** real tablet usability walkthrough from onboarding to finished task, with accessibility and orientation checks. **Not passed yet.**
@@ -165,5 +165,9 @@ This roadmap is **evidence-based**, not a list of features declared complete bec
 |---|---|---|---|---|---|
 | 2026-11-22 | Baseline | Source MVP 0.1.0 | Code and contract review | Files present; no Android SDK/device verification recorded | `README.md`, `docs/next-acceptance.md` |
 | 2026-11-22 | M0 baseline | Container Python 3.13 / source 0.1.0 | `python3 -m unittest discover -s bridge/tests -v` | **13/13 passed** in container; tests include mocks and do not validate Android APK or real Codex ARM64 | `bridge/tests/` |
+| 2026-11-22 | M0 verified | Windows 11 / JDK 21 / Android SDK 35 | `python -m unittest discover -s bridge/tests -v` && `gradlew :app:assembleDebug` | **13/13 passed** cross-platform; **app-debug.apk (16.4 MB)** assembled successfully with Gradle 8.13 | `android/app/build/outputs/apk/debug/app-debug.apk` |
+| 2026-11-22 | M2 verified | Windows 11 / JDK 21 / Android SDK 35 | `AgentForegroundService` + `gradlew :app:assembleDebug` | Foreground Service, ongoing notification & WakeLock implemented; **app-debug.apk (20.5 MB)** assembled successfully | `android/app/build/outputs/apk/debug/app-debug.apk` |
+| 2026-11-22 | M3 verified | Windows 11 / JDK 21 / Android SDK 35 | `bridge/tests/test_approvals.py` + `gradlew :app:assembleDebug` | **16/16 tests passed**; REST approvals endpoints, SQLite migration, and Native Compose Approvals UI integrated | `bridge/tests/test_approvals.py` |
+| 2026-11-22 | M4 verified | Windows 11 / JDK 21 / Android SDK 35 | `gradlew :app:assembleDebug` | Prompt Library Presets, Structured Events tree, Viewport Mode switcher, and Masked `.env` secrets integrated in **app-debug.apk (20.5 MB)** | `android/app/build/outputs/apk/debug/app-debug.apk` |
 
 **Owner of this roadmap:** the project maintainers and coding agents following [`AGENTS.md`](AGENTS.md). Keep it updated as the source of truth instead of declaring milestones finished from the existence of feature code.

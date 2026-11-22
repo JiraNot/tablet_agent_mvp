@@ -8,12 +8,14 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -34,6 +36,11 @@ import org.json.JSONObject
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 101)
+            }
+        }
         setContent { MaterialTheme(colorScheme = lightColorScheme()) { TabletAgentApp() } }
     }
 }
@@ -54,6 +61,7 @@ fun TabletAgentApp() {
     var tasks by remember { mutableStateOf<List<JSONObject>>(emptyList()) }
     var selectedTask by rememberSaveable { mutableStateOf("") }
     var events by remember { mutableStateOf<List<JSONObject>>(emptyList()) }
+    var approvals by remember { mutableStateOf<List<JSONObject>>(emptyList()) }
     var eventCursor by rememberSaveable { mutableIntStateOf(0) }
     var previewUrl by remember { mutableStateOf("") }
     var previewState by remember { mutableStateOf("stopped") }
@@ -71,6 +79,7 @@ fun TabletAgentApp() {
 
     LaunchedEffect(selectedTask) {
         events = emptyList()
+        approvals = emptyList()
         eventCursor = 0
     }
     // Reconnect/poll on-device: no remote server or external networking.
@@ -85,6 +94,19 @@ fun TabletAgentApp() {
                     }
                     if (selectedProject.isNotBlank()) {
                         tasks = api.tasks(selectedProject).objects()
+                        val activeTask = tasks.firstOrNull {
+                            it.optString("status") in listOf("QUEUED", "PLANNING", "WAITING_APPROVAL", "EXECUTING", "VERIFYING", "REPAIRING")
+                        }
+                        if (activeTask != null) {
+                            AgentForegroundService.update(
+                                context,
+                                activeTask.optString("id"),
+                                activeTask.optString("status"),
+                                activeTask.optString("prompt")
+                            )
+                        } else if (tasks.isNotEmpty() && tasks.all { it.optString("status") in listOf("PLANNED", "COMPLETED", "NEEDS_VERIFICATION", "FAILED", "CANCELLED", "BLOCKED_SETUP", "INTERRUPTED") }) {
+                            AgentForegroundService.stop(context)
+                        }
                         val p = api.previewStatus(selectedProject)
                         previewState = p.optString("status", "stopped")
                         previewUrl = p.optString("url", "")
@@ -94,6 +116,9 @@ fun TabletAgentApp() {
                                 eventCursor = fresh.last().optInt("seq", eventCursor)
                                 events = (events + fresh).takeLast(220)
                             }
+                            runCatching { approvals = api.approvals(selectedTask).objects() }
+                        } else {
+                            approvals = emptyList()
                         }
                     }
                 } catch (e: Exception) { error = e.message ?: "API error" }
@@ -167,15 +192,31 @@ fun TabletAgentApp() {
                             AgentScreen(
                     prompt = prompt, onPrompt = { prompt = it }, mode = mode, onMode = { mode = it },
                     tasks = tasks, selectedTask = selectedTask, onSelectTask = { selectedTask = it }, events = events,
+                    approvals = approvals,
                     canRun = online && token.isNotBlank() && selectedProject.isNotBlank(),
                     onSend = { scope.launch {
                         try {
                             val t = api.startTask(selectedProject, prompt, mode)
-                            selectedTask = t.getString("id"); prompt = ""; error = ""
+                            val taskId = t.getString("id")
+                            selectedTask = taskId
+                            AgentForegroundService.start(context, taskId, selectedProject, mode.uppercase(), prompt)
+                            prompt = ""; error = ""
                             tasks = api.tasks(selectedProject).objects()
                         } catch (e: Exception) { notify(e) }
                     } },
-                    onCancel = { scope.launch { runCatching { api.cancelTask(selectedTask); tasks = api.tasks(selectedProject).objects() }.onFailure { notify(it) } } }
+                    onCancel = { scope.launch { runCatching {
+                        api.cancelTask(selectedTask)
+                        AgentForegroundService.stop(context)
+                        tasks = api.tasks(selectedProject).objects()
+                    }.onFailure { notify(it) } } },
+                    onApprove = { aid -> scope.launch { runCatching {
+                        api.respondApproval(selectedTask, aid, true)
+                        approvals = api.approvals(selectedTask).objects()
+                    }.onFailure { notify(it) } } },
+                    onDeny = { aid -> scope.launch { runCatching {
+                        api.respondApproval(selectedTask, aid, false)
+                        approvals = api.approvals(selectedTask).objects()
+                    }.onFailure { notify(it) } } }
                             )
                         }
                         Box(Modifier.weight(.49f).fillMaxHeight()) { PreviewScreen(previewUrl, previewState,
@@ -185,12 +226,31 @@ fun TabletAgentApp() {
                     } else AgentScreen(
                         prompt = prompt, onPrompt = { prompt = it }, mode = mode, onMode = { mode = it },
                         tasks = tasks, selectedTask = selectedTask, onSelectTask = { selectedTask = it }, events = events,
+                        approvals = approvals,
                         canRun = online && token.isNotBlank() && selectedProject.isNotBlank(),
                         onSend = { scope.launch {
-                            try { val t=api.startTask(selectedProject,prompt,mode); selectedTask=t.getString("id");prompt="";error="";tasks=api.tasks(selectedProject).objects() }
-                            catch(e:Exception){notify(e)}
+                            try {
+                                val t = api.startTask(selectedProject, prompt, mode)
+                                val taskId = t.getString("id")
+                                selectedTask = taskId
+                                AgentForegroundService.start(context, taskId, selectedProject, mode.uppercase(), prompt)
+                                prompt = ""; error = ""
+                                tasks = api.tasks(selectedProject).objects()
+                            } catch (e: Exception) { notify(e) }
                         } },
-                        onCancel = { scope.launch { runCatching { api.cancelTask(selectedTask); tasks=api.tasks(selectedProject).objects() }.onFailure { notify(it) } } }
+                        onCancel = { scope.launch { runCatching {
+                            api.cancelTask(selectedTask)
+                            AgentForegroundService.stop(context)
+                            tasks = api.tasks(selectedProject).objects()
+                        }.onFailure { notify(it) } } },
+                        onApprove = { aid -> scope.launch { runCatching {
+                            api.respondApproval(selectedTask, aid, true)
+                            approvals = api.approvals(selectedTask).objects()
+                        }.onFailure { notify(it) } } },
+                        onDeny = { aid -> scope.launch { runCatching {
+                            api.respondApproval(selectedTask, aid, false)
+                            approvals = api.approvals(selectedTask).objects()
+                        }.onFailure { notify(it) } } }
                     )
                 }
                 1 -> PreviewScreen(previewUrl, previewState,
@@ -238,10 +298,74 @@ fun TabletAgentApp() {
 @Composable
 private fun AgentScreen(prompt: String, onPrompt: (String) -> Unit, mode: String, onMode: (String) -> Unit,
                         tasks: List<JSONObject>, selectedTask: String, onSelectTask: (String) -> Unit,
-                        events: List<JSONObject>, canRun: Boolean, onSend: () -> Unit, onCancel: () -> Unit) {
+                        events: List<JSONObject>, approvals: List<JSONObject> = emptyList(),
+                        canRun: Boolean, onSend: () -> Unit, onCancel: () -> Unit,
+                        onApprove: (String) -> Unit = {}, onDeny: (String) -> Unit = {}) {
     Column(Modifier.fillMaxSize()) {
+        val pendingApproval = approvals.firstOrNull { it.optString("status") == "PENDING" }
+        if (pendingApproval != null) {
+            Surface(
+                color = MaterialTheme.colorScheme.tertiaryContainer,
+                shape = MaterialTheme.shapes.medium,
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+            ) {
+                Column(Modifier.padding(10.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Security, null, tint = MaterialTheme.colorScheme.onTertiaryContainer)
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "Approval Required: ${pendingApproval.optString("type")}",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onTertiaryContainer
+                        )
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        pendingApproval.optString("target"),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onTertiaryContainer
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
+                        OutlinedButton(onClick = { onDeny(pendingApproval.optString("id")) }) {
+                            Text("Deny")
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        Button(onClick = { onApprove(pendingApproval.optString("id")) }) {
+                            Text("Approve")
+                        }
+                    }
+                }
+            }
+        }
         Text("Describe what to build", style = MaterialTheme.typography.titleMedium)
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(4.dp))
+        val presets = listOf(
+            Triple("✨ Feature", "build", "Build a feature that "),
+            Triple("🔨 Fix Error", "build", "Fix the following issue or error: "),
+            Triple("🎨 UI Polish", "build", "Polish the user interface, styling, and tablet responsiveness for "),
+            Triple("⚡ Refactor", "plan", "Review and refactor code structure for "),
+            Triple("🔒 Audit", "plan", "Audit workspace for security vulnerabilities and misconfigurations in "),
+            Triple("🧪 Run Tests", "build", "Run test suites and verify build output with evidence")
+        )
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Presets:", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+            presets.forEach { (label, targetMode, template) ->
+                SuggestionChip(
+                    onClick = {
+                        onMode(targetMode)
+                        onPrompt(template)
+                    },
+                    label = { Text(label, style = MaterialTheme.typography.labelSmall) }
+                )
+            }
+        }
+        Spacer(Modifier.height(6.dp))
         OutlinedTextField(prompt, onPrompt, modifier = Modifier.fillMaxWidth().heightIn(min = 115.dp),
             placeholder = { Text("Describe a feature, bug, or improvement…") }, maxLines = 5)
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -250,7 +374,7 @@ private fun AgentScreen(prompt: String, onPrompt: (String) -> Unit, mode: String
             FilterChip(selected = mode == "build", onClick = { onMode("build") }, label = { Text("Build") })
             Spacer(Modifier.weight(1f))
             Button(onClick = onSend, enabled = canRun && prompt.isNotBlank()) {
-                Icon(Icons.Default.Send, null, Modifier.size(17.dp))
+                Icon(Icons.AutoMirrored.Filled.Send, null, Modifier.size(17.dp))
                 Spacer(Modifier.width(5.dp)); Text("Run Codex")
             }
         }
@@ -284,13 +408,41 @@ private fun AgentScreen(prompt: String, onPrompt: (String) -> Unit, mode: String
             Text("Agent activity", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
             if (selectedTask.isNotEmpty()) TextButton(onClick = onCancel) { Text("Cancel") }
         }
-        LazyColumn(Modifier.weight(.55f)) {
+        LazyColumn(Modifier.weight(.55f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             items(events, key = { it.optInt("seq") }) { event ->
-                Column(Modifier.fillMaxWidth().padding(vertical = 5.dp)) {
-                    Text(event.optString("kind").uppercase(), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
-                    Text(event.optString("message"), style = MaterialTheme.typography.bodySmall)
+                val kind = event.optString("kind").lowercase()
+                val msg = event.optString("message")
+                Surface(
+                    shape = MaterialTheme.shapes.small,
+                    color = when (kind) {
+                        "message" -> MaterialTheme.colorScheme.secondaryContainer
+                        "error" -> MaterialTheme.colorScheme.errorContainer
+                        "verification" -> MaterialTheme.colorScheme.tertiaryContainer
+                        "tool" -> MaterialTheme.colorScheme.surfaceVariant
+                        "approval", "approval_resolved" -> MaterialTheme.colorScheme.surfaceVariant
+                        else -> MaterialTheme.colorScheme.surface
+                    },
+                    tonalElevation = 1.dp,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(Modifier.padding(8.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            val (icon, color) = when (kind) {
+                                "message" -> Pair(Icons.Default.SmartToy, MaterialTheme.colorScheme.primary)
+                                "error" -> Pair(Icons.Default.Error, MaterialTheme.colorScheme.error)
+                                "verification" -> Pair(Icons.Default.CheckCircle, MaterialTheme.colorScheme.tertiary)
+                                "tool" -> Pair(Icons.Default.Build, MaterialTheme.colorScheme.secondary)
+                                "approval", "approval_resolved" -> Pair(Icons.Default.Security, MaterialTheme.colorScheme.primary)
+                                else -> Pair(Icons.Default.Info, MaterialTheme.colorScheme.outline)
+                            }
+                            Icon(icon, null, Modifier.size(14.dp), tint = color)
+                            Spacer(Modifier.width(6.dp))
+                            Text(kind.uppercase(), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = color)
+                        }
+                        Spacer(Modifier.height(3.dp))
+                        Text(msg, style = MaterialTheme.typography.bodySmall)
+                    }
                 }
-                HorizontalDivider()
             }
         }
     }
@@ -299,23 +451,37 @@ private fun AgentScreen(prompt: String, onPrompt: (String) -> Unit, mode: String
 @Composable
 private fun PreviewScreen(url: String, status: String, onStart: () -> Unit, onStop: () -> Unit, enabled: Boolean) {
     var refreshTick by remember { mutableIntStateOf(0) }
+    var viewportMode by remember { mutableStateOf("full") }
     Column(Modifier.fillMaxSize()) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Live preview", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
             Text(status, style = MaterialTheme.typography.labelSmall)
         }
-        Row {
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically) {
             Button(onClick = onStart, enabled = enabled && status == "stopped") { Text("Start dev server") }
-            Spacer(Modifier.width(8.dp))
+            Spacer(Modifier.width(6.dp))
             OutlinedButton(onClick = onStop, enabled = enabled && status != "stopped") { Text("Stop") }
-            Spacer(Modifier.width(8.dp))
+            Spacer(Modifier.width(6.dp))
             OutlinedButton(onClick = { refreshTick++ }, enabled = url.isNotBlank()) { Text("Reload") }
+            Spacer(Modifier.width(10.dp))
+            FilterChip(selected = viewportMode == "full", onClick = { viewportMode = "full" }, label = { Text("Full") })
+            Spacer(Modifier.width(4.dp))
+            FilterChip(selected = viewportMode == "tablet", onClick = { viewportMode = "tablet" }, label = { Text("Tablet (768dp)") })
+            Spacer(Modifier.width(4.dp))
+            FilterChip(selected = viewportMode == "mobile", onClick = { viewportMode = "mobile" }, label = { Text("Phone (375dp)") })
         }
         Spacer(Modifier.height(6.dp))
         Text(if (url.isNotBlank()) url else "Run npm dev to see your project", style = MaterialTheme.typography.bodySmall)
         Spacer(Modifier.height(6.dp))
         if (url.startsWith("http://127.0.0.1:")) {
-            key(url, refreshTick) { LocalPreview(url, Modifier.fillMaxSize()) }
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+                val previewMod = when (viewportMode) {
+                    "tablet" -> Modifier.width(768.dp).fillMaxHeight()
+                    "mobile" -> Modifier.width(375.dp).fillMaxHeight()
+                    else -> Modifier.fillMaxSize()
+                }
+                key(url, refreshTick) { LocalPreview(url, previewMod) }
+            }
         } else {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("No local preview yet") }
         }
@@ -345,16 +511,19 @@ private fun LocalPreview(url: String, modifier: Modifier = Modifier) {
 @Composable
 private fun FilesScreen(files: List<JSONObject>, dir: String, selected: String, body: String,
                         onFolder: (String) -> Unit, onFile: (String) -> Unit, onEdit: (String) -> Unit, onSave: () -> Unit) {
+    var maskSecrets by rememberSaveable { mutableStateOf(true) }
+    val isEnv = selected.substringAfterLast('/').startsWith(".env")
+
     Column(Modifier.fillMaxSize()) {
         Text("Quick file editor", style = MaterialTheme.typography.titleMedium)
         Text("Project / $dir", style = MaterialTheme.typography.bodySmall)
         if (dir != ".") TextButton(onClick = { onFolder(dir.substringBeforeLast('/', ".").ifBlank { "." }) }) { Text("← Back") }
         LazyColumn(Modifier.weight(.4f)) {
             items(files, key = { it.optString("path") }) { f ->
-                val isDir=f.optBoolean("directory");val path=f.optString("path")
-                Row(Modifier.fillMaxWidth().clickable { if (isDir) onFolder(path) else onFile(path) }.padding(9.dp),verticalAlignment = Alignment.CenterVertically) {
+                val isDir = f.optBoolean("directory"); val path = f.optString("path")
+                Row(Modifier.fillMaxWidth().clickable { if (isDir) onFolder(path) else onFile(path) }.padding(9.dp), verticalAlignment = Alignment.CenterVertically) {
                     Icon(if (isDir) Icons.Default.Folder else Icons.Default.Description, null, Modifier.size(18.dp))
-                    Spacer(Modifier.width(9.dp));Text(f.optString("name"), style = MaterialTheme.typography.bodyMedium)
+                    Spacer(Modifier.width(9.dp)); Text(f.optString("name"), style = MaterialTheme.typography.bodyMedium)
                 }
                 HorizontalDivider()
             }
@@ -363,11 +532,40 @@ private fun FilesScreen(files: List<JSONObject>, dir: String, selected: String, 
             Spacer(Modifier.height(8.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(selected, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                if (isEnv) {
+                    TextButton(onClick = { maskSecrets = !maskSecrets }) {
+                        Icon(if (maskSecrets) Icons.Default.Visibility else Icons.Default.VisibilityOff, null, Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(if (maskSecrets) "Reveal" else "Mask")
+                    }
+                }
+                Spacer(Modifier.width(4.dp))
                 Button(onClick = onSave) { Text("Save") }
             }
-            if (selected.substringAfterLast('/').startsWith(".env"))
-                Text("Sensitive file: do not paste secrets into Agent prompts", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
-            OutlinedTextField(value = body, onValueChange = onEdit, modifier = Modifier.fillMaxWidth().weight(.6f), textStyle = MaterialTheme.typography.bodySmall)
+            if (isEnv) {
+                Text(
+                    if (maskSecrets) "Sensitive .env file: secrets are masked for safety" else "Editing raw secrets: never paste keys into public prompts",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+            val displayValue = if (isEnv && maskSecrets) {
+                body.lines().joinToString("\n") { line ->
+                    if (line.contains('=') && !line.trimStart().startsWith('#')) {
+                        line.substringBefore('=') + "=••••••••••••"
+                    } else line
+                }
+            } else body
+
+            OutlinedTextField(
+                value = displayValue,
+                onValueChange = {
+                    if (!isEnv || !maskSecrets) onEdit(it)
+                },
+                readOnly = isEnv && maskSecrets,
+                modifier = Modifier.fillMaxWidth().weight(.6f),
+                textStyle = MaterialTheme.typography.bodySmall
+            )
         } else {
             Box(Modifier.weight(.6f), contentAlignment = Alignment.Center) { Text("Select a file to edit") }
         }

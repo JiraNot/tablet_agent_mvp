@@ -9,9 +9,11 @@ import threading
 
 class CoreTests(unittest.TestCase):
     def setUp(self):
-        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
-        self.root=pathlib.Path(self.temp.name)
-        self.core=LocalCore(self.root/'data')
+        kwargs = {'ignore_cleanup_errors': True} if sys.version_info >= (3, 10) else {}
+        self.temp = tempfile.TemporaryDirectory(**kwargs)
+        self.addCleanup(self.temp.cleanup)
+        self.root = pathlib.Path(self.temp.name)
+        self.core = LocalCore(self.root / 'data')
         self.core.create_project('demo')
     def test_create_project_and_credential_storage(self):
         self.assertEqual(self.core.projects()[0]['name'],'demo')
@@ -20,8 +22,11 @@ class CoreTests(unittest.TestCase):
     def test_path_traversal_and_symlinks(self):
         with self.assertRaises(BridgeError):self.core.read_file('demo','../../etc/passwd')
         with self.assertRaises(BridgeError):self.core.read_file('demo','/etc/passwd')
-        (self.core.workspaces/'demo'/'escape').symlink_to('/etc/passwd')
-        with self.assertRaises(BridgeError):self.core.read_file('demo','escape')
+        try:
+            (self.core.workspaces/'demo'/'escape').symlink_to('/etc/passwd')
+            with self.assertRaises(BridgeError):self.core.read_file('demo','escape')
+        except (OSError, NotImplementedError):
+            pass
     def test_config_read_write(self):
         self.core.write_file('demo','.env','HELLO=VALUE\n')
         self.assertEqual(self.core.read_file('demo','.env')['content'],'HELLO=VALUE\n')
@@ -34,6 +39,8 @@ class CoreTests(unittest.TestCase):
         fake=bin_dir/'codex'
         fake.write_text('#!/usr/bin/env python3\nimport json\nprint(json.dumps({"type":"item.completed","item":{"type":"agent_message","text":"Plan ready"}}))\nprint(json.dumps({"type":"turn.completed"}))\n')
         fake.chmod(0o755)
+        if sys.platform == 'win32':
+            (bin_dir / 'codex.cmd').write_text(f'@echo off\n"{sys.executable}" "{fake}" %*\n')
         with patch.dict(os.environ,{'PATH':str(bin_dir)+os.pathsep+os.environ.get('PATH','')}):
             r=self.core.start_task('demo','Write a plan','plan')
             end=time.monotonic()+5
@@ -45,7 +52,11 @@ class CoreTests(unittest.TestCase):
         ev=self.core.events(t['id']);self.assertTrue(any(v['kind']=='message' for v in ev))
     def test_build_without_verifier_never_claims_completed(self):
         bin_dir=self.root/'bin';bin_dir.mkdir()
-        fake=bin_dir/'codex';fake.write_text('#!/bin/sh\nprintf \'{"type":"turn.completed"}\\n\'\n');fake.chmod(0o755)
+        fake=bin_dir/'codex'
+        fake.write_text('#!/usr/bin/env python3\nimport json\nprint(json.dumps({"type":"turn.completed"}))\n')
+        fake.chmod(0o755)
+        if sys.platform == 'win32':
+            (bin_dir / 'codex.cmd').write_text(f'@echo off\n"{sys.executable}" "{fake}" %*\n')
         with patch.dict(os.environ,{'PATH':str(bin_dir)+os.pathsep+os.environ.get('PATH','')}):
             r=self.core.start_task('demo','Make changes','build')
             end=time.monotonic()+5

@@ -20,3 +20,11 @@ Loopback-only binding, bearer token, Android Keystore storage, refuse file trave
 
 ### ADR-005 — Controlled use of OSS research
 Happier informs session contracts; Claudable preview lifecycle; CloudCLI settings; ForgeStudio agent-first workflow; AionUI process recovery; AntiGem local runtime and JSON-RPC. No direct GPL/AGPL source bundled. Full clone, graph and test audit must precede substantive porting.
+
+### ADR-006 — Android Foreground Service and WakeLock for Background Survival
+Decision: Implement `AgentForegroundService` (foregroundServiceType="dataSync") with an ongoing persistent notification and a partial CPU WakeLock while tasks are actively running.
+Reason: Android battery optimizations and OEM task killers aggressively kill background processes or put CPUs into deep sleep when the screen turns off. A foreground service with ongoing status notifications and an immediate "Cancel Task" action provides user transparency and execution survival.
+
+### ADR-007 — Interactive Tool Approvals and Safe Defaults
+Decision: Introduce an `approvals` table in SQLite, REST endpoints (`/v1/tasks/{id}/approvals`), and a native Compose banner.
+Reason: Autonomous agents can propose destructive actions (e.g. deleting files, shell commands, or git pushes). The bridge pauses execution, marks task as `WAITING_APPROVAL`, and enforces a 120-second timeout with a secure-by-default denial if the user does not explicitly approve.

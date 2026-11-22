@@ -5,12 +5,14 @@ from core import LocalCore
 
 class WorkflowTests(unittest.TestCase):
     def setUp(self):
-        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
-        self.root=pathlib.Path(self.temp.name)
-        self.core=LocalCore(self.root/'work')
+        kwargs = {'ignore_cleanup_errors': True} if sys.version_info >= (3, 10) else {}
+        self.temp = tempfile.TemporaryDirectory(**kwargs)
+        self.addCleanup(self.temp.cleanup)
+        self.root = pathlib.Path(self.temp.name)
+        self.core = LocalCore(self.root / 'work')
         self.core.create_project('project')
-        self.bin=self.root/'bin';self.bin.mkdir()
-        codex=self.bin/'codex'
+        self.bin = self.root / 'bin'; self.bin.mkdir()
+        codex = self.bin / 'codex'
         codex.write_text('''#!/usr/bin/env python3
 import json,os,sys
 marker=os.environ['TABLET_AGENT_TEST_LOG']
@@ -20,7 +22,7 @@ print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':
 print(json.dumps({'type':'turn.completed'}))
 ''')
         codex.chmod(0o755)
-        npm=self.bin/'npm'
+        npm = self.bin / 'npm'
         npm.write_text('''#!/usr/bin/env python3
 import os, pathlib, sys
 p=pathlib.Path(os.environ['TABLET_AGENT_NPM_MARKER'])
@@ -31,10 +33,13 @@ if not p.exists():
 print('Build succeeded')
 ''')
         npm.chmod(0o755)
-        (self.core.workspaces/'project'/'package.json').write_text(json.dumps({'scripts':{'build':'echo done'}}))
-        self.env={'PATH':str(self.bin)+os.pathsep+os.environ.get('PATH',''),
-                 'TABLET_AGENT_TEST_LOG':str(self.root/'agent_calls'),
-                 'TABLET_AGENT_NPM_MARKER':str(self.root/'npm_marker')}
+        if sys.platform == 'win32':
+            (self.bin / 'codex.cmd').write_text(f'@echo off\n"{sys.executable}" "{codex}" %*\n')
+            (self.bin / 'npm.cmd').write_text(f'@echo off\n"{sys.executable}" "{npm}" %*\n')
+        (self.core.workspaces / 'project' / 'package.json').write_text(json.dumps({'scripts':{'build':'echo done'}}))
+        self.env = {'PATH': str(self.bin) + os.pathsep + os.environ.get('PATH',''),
+                 'TABLET_AGENT_TEST_LOG': str(self.root / 'agent_calls'),
+                 'TABLET_AGENT_NPM_MARKER': str(self.root / 'npm_marker')}
     def until_terminal(self,task_id):
         end=time.monotonic()+8
         while time.monotonic()<end:

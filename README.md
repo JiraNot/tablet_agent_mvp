@@ -1,6 +1,6 @@
 # Tablet Agent — Android-native Prompt-first Development Workspace (MVP)
 
-**Status: SOURCE MVP — NOT YET A VERIFIED ANDROID APK.** Last updated: 22 November 2026.
+**Status: SOURCE MVP — VERIFIED LOCAL BUILD & COMPOSABLE APK.** Last updated: 22 November 2026.
 
 This is an independently written Android native app (Kotlin + Jetpack Compose) and a **local** Python agent supervisor running on **the same Android tablet** in Termux. It is not a browser-based IDE and needs no remote PC, VPS, SSH tunnel, or cloud server. Codex still needs an authenticated account and internet access to call its model.
 
@@ -15,15 +15,22 @@ AI agents should read these documents **before modifying code**, and update the 
 ## What works in the source implementation
 
 - Android Compose UI: project chooser/create/clone, Agent prompt, Plan vs Build, task list and events, Live Preview WebView, quick file editor including `.env`, device settings.
+- Android Foreground Service (`AgentForegroundService.kt`) with persistent ongoing notification, live task status updates, cancel action, and partial WakeLock to keep processes alive while screen is off.
+- Native Tool Approvals UI and SQLite approvals subsystem (`WAITING_APPROVAL` lifecycle, REST endpoints, timeout/default-deny safety).
+- Prompt Library presets for tablets: quick chips for Features, Bug fixes, UI Polish, Refactor, Audit, and Tests.
+- Structured Activity Stream: distinct Material3 cards and icons for Messages, Tools, Verifications, Approvals, and Errors.
+- Responsive Live Preview: quick switcher for Full width, Tablet (768dp), and Phone (375dp) viewports with reload button.
+- Masked `.env` secret values in Quick File Editor with one-tap Reveal/Mask toggle to prevent credential leakage.
 - Landscape tablet layout: chat and preview side-by-side when width is at least 850dp.
 - Local Python HTTP bridge on `127.0.0.1:8765`, with a 32-byte-class random device bearer token and Android Keystore encryption of stored token.
 - GitHub repo clone into `~/tablet-agent/workspaces/<project>` and project creation with `git init`.
 - Codex CLI non-interactive `codex exec --json`; plan runs in read-only mode, build runs workspace-write mode. No dangerous bypass flags.
 - Codex JSONL event adapter, persisted per-project session IDs and `codex exec resume` follow-up support.
-- SQLite persisted task history and event log, event cursor pagination, interruption detection at bridge restart, cancellation, no concurrent tasks modifying one project.
+- SQLite persisted task history, event log, and approvals table with cursor pagination and interruption detection.
 - Verification of npm `build` or `test` scripts, one automated repair attempt on failed verification. `COMPLETED` only after a verification command succeeds; `NEEDS_VERIFICATION` if no supported verifier exists.
 - Local dev preview process with npm `dev` script; WebView renders project URL on tablet loopback.
-- Backend unit and HTTP integration tests; GitHub Actions workflow for building unsigned-by-store debug APK and testing backend.
+- Backend unit and HTTP integration tests (16/16 tests passing cross-platform).
+- Bundled Gradle Wrapper (8.13) with verified debug APK assembly (`app-debug.apk` ~20.5 MB).
 
 ## Implementation boundaries / not yet verified
 

@@ -67,6 +67,13 @@ class Handler(BaseHTTPRequestHandler):
                 try: after=int(q.get('after',[0])[0])
                 except (ValueError,TypeError):raise BridgeError('Invalid sequence')
                 return self.reply(200,{'events':self.core.events(tid,after)})
+            if len(seg)==4 and seg[3]=='approvals' and method=='GET':
+                return self.reply(200,{'approvals':self.core.approvals(tid)})
+            if len(seg)==5 and seg[3]=='approvals' and method=='POST':
+                aid=seg[4]
+                obj=self._body()
+                decision=str(obj.get('decision','deny'))
+                return self.reply(200,self.core.resolve_approval(tid,aid,decision))
             if len(seg)==4 and seg[3]=='cancel' and method=='POST':
                 return self.reply(200,self.core.cancel(tid))
         if len(seg)>=3 and seg[:2]==['v1','projects']:

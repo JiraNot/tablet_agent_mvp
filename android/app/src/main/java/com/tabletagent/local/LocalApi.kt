@@ -50,6 +50,10 @@ class LocalApi(private val deviceToken: String) {
     suspend fun startTask(project: String, prompt: String, mode: String): JSONObject = request("POST", "/v1/tasks",
         JSONObject().put("project", project).put("prompt", prompt).put("mode", mode).put("agent", "codex"))
     suspend fun events(taskId: String, after: Int): JSONArray = request("GET", "/v1/tasks/${encode(taskId)}/events?after=$after").getJSONArray("events")
+    suspend fun approvals(taskId: String): JSONArray = request("GET", "/v1/tasks/${encode(taskId)}/approvals").getJSONArray("approvals")
+    suspend fun respondApproval(taskId: String, approvalId: String, allow: Boolean): JSONObject = request("POST",
+        "/v1/tasks/${encode(taskId)}/approvals/${encode(approvalId)}",
+        JSONObject().put("decision", if (allow) "allow" else "deny"))
     suspend fun cancelTask(taskId: String) = request("POST", "/v1/tasks/${encode(taskId)}/cancel", JSONObject())
     suspend fun files(project: String, dir: String = "."): JSONArray = request("GET", "/v1/projects/${encode(project)}/files?path=${encode(dir)}").getJSONArray("files")
     suspend fun file(project: String, path: String): JSONObject = request("GET", "/v1/projects/${encode(project)}/file?path=${encode(path)}")

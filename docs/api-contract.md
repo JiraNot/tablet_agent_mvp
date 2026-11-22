@@ -14,6 +14,8 @@
 | POST | `/v1/tasks` | `{project,prompt,mode:"plan|build",agent:"codex"}` |
 | GET | `/v1/tasks/{uuid}` | persisted status and verification |
 | GET | `/v1/tasks/{uuid}/events?after=N` | next 120 ordered events |
+| GET | `/v1/tasks/{uuid}/approvals` | pending and resolved tool approvals |
+| POST | `/v1/tasks/{uuid}/approvals/{id}` | `{decision:"allow|deny"}`, resolve approval |
 | POST | `/v1/tasks/{uuid}/cancel` | stop process, terminal task state |
 | GET | `/v1/projects/{name}/preview` | local process state/url |
 | POST | `/v1/projects/{name}/preview/start` | run npm dev, optional `{port}` |
@@ -21,4 +23,4 @@
 
 Local-only port 8765; preview default port 3000 (Next) or 5173 (Vite). A project might require custom scripts/ports. No remote API and no external shell command endpoint.
 
-States: `QUEUED`, `PLANNING`, `EXECUTING`, `VERIFYING`, `REPAIRING`, `PLANNED`, `COMPLETED`, `NEEDS_VERIFICATION`, `FAILED`, `CANCELLED`, `BLOCKED_SETUP`, `INTERRUPTED`.
+States: `QUEUED`, `PLANNING`, `WAITING_APPROVAL`, `EXECUTING`, `VERIFYING`, `REPAIRING`, `PLANNED`, `COMPLETED`, `NEEDS_VERIFICATION`, `FAILED`, `CANCELLED`, `BLOCKED_SETUP`, `INTERRUPTED`.
