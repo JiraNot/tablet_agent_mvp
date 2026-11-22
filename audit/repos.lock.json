@@ -1,0 +1,12 @@
+{
+  "audit_date": "2026-11-22",
+  "note": "The commit ids were obtained from GitHub repository metadata, not from completed local clones. Pin before running audit.",
+  "repositories": [
+    {"name":"Claudable","repo":"anymorph-ai/Claudable","branch":"main","commit":"2634077b0eecbf5affd1a8a88fe9f5b5bafde514","license":"MIT"},
+    {"name":"CloudCLI","repo":"siteboon/claudecodeui","branch":"main","commit":"b6959148ec006f258d737e72bb630ff2e5e84672","license":"AGPL-3.0"},
+    {"name":"ForgeStudio","repo":"DrBrainlessLol/ForgeStudio","branch":"main","commit":"1a0a53bfee75937dae16ab8398f1e365b788ab0b","license":"AGPL-3.0"},
+    {"name":"Happier","repo":"happier-dev/happier","branch":"dev","commit":"d6ec446205b6911e251513500452aa51fb3affd5","license":"MIT"},
+    {"name":"AntiGem","repo":"Santoshkurmi/antigem","branch":"standalone","commit":"5a4141edcd8b17a08d73c807909c6b30359f7730","license":"GPL-3.0"},
+    {"name":"AionUI","repo":"iOfficeAI/AionUi","branch":"main","commit":"e108b6b56b1a6eb99a00904878d0582f657b2908","license":"Apache-2.0"}
+  ]
+}

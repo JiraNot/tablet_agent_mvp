@@ -1,0 +1,12 @@
+.gradle/
+.idea/
+**/build/
+*.apk
+*.aab
+**/__pycache__/
+**/*.pyc
+.workspaces/
+state.sqlite3*
+device_token
+.DS_Store
+local.properties
