@@ -184,8 +184,16 @@ object CliAuthManager {
             val rootfs = BootstrapManager.getRootfsDir(context)
             val tmpDir = File(rootfs, "tmp").apply { mkdirs() }
             val urlFile = File(tmpDir, "oauth_url.txt").apply { delete() }
-            val browserShim = File(tmpDir, "oauth_capture.sh").apply {
-                writeText("#!/bin/sh\nprintf '%s\\n' \"\$1\" > /tmp/oauth_url.txt\n")
+            val shimScript = "#!/bin/sh\nprintf '%s\\n' \"\$1\" > /tmp/oauth_url.txt.tmp && mv /tmp/oauth_url.txt.tmp /tmp/oauth_url.txt\n"
+            val xdgOpen = File(rootfs, "usr/bin/xdg-open").apply {
+                parentFile?.mkdirs()
+                writeText(shimScript)
+                setReadable(true, false)
+                setExecutable(true, false)
+            }
+            File(tmpDir, "oauth_capture.sh").apply {
+                writeText(shimScript)
+                setReadable(true, false)
                 setExecutable(true, false)
             }
 
@@ -204,7 +212,7 @@ object CliAuthManager {
                     context = context,
                     command = command,
                     workingDir = "/root",
-                    extraEnv = mapOf("BROWSER" to "/tmp/${browserShim.name}")
+                    extraEnv = mapOf("BROWSER" to "/usr/bin/${xdgOpen.name}")
                 )
             } catch (e: Exception) {
                 _oauthState.value = _oauthState.value.copy(active = false, error = e.message ?: "Failed to launch auth")
@@ -212,16 +220,20 @@ object CliAuthManager {
             }
             activeProcess = proc
 
-            // Poll /tmp/oauth_url.txt captured from $BROWSER shim for clean unwrapped URLs.
+            var capturedViaShim = false
+            // Poll /tmp/oauth_url.txt captured from xdg-open/$BROWSER shim for exact unwrapped URLs.
             val urlWatcher = launch {
                 while (isActive && proc.isAlive) {
                     if (urlFile.isFile) {
                         val captured = runCatching { urlFile.readText(Charsets.UTF_8).trim() }.getOrDefault("")
-                        if (captured.startsWith("https://") && _oauthState.value.oauthUrl != captured) {
-                            _oauthState.value = _oauthState.value.copy(oauthUrl = captured)
+                        if (captured.startsWith("https://")) {
+                            capturedViaShim = true
+                            if (_oauthState.value.oauthUrl != captured) {
+                                _oauthState.value = _oauthState.value.copy(oauthUrl = captured)
+                            }
                         }
                     }
-                    delay(250)
+                    delay(200)
                 }
             }
 
@@ -233,9 +245,12 @@ object CliAuthManager {
                         if (clean.isEmpty()) continue
 
                         var next = _oauthState.value
-                        val matchedUrl = urlRegex.find(clean)?.value
-                        if (matchedUrl != null && next.oauthUrl.isBlank()) {
-                            next = next.copy(oauthUrl = matchedUrl)
+                        // For Codex (and fallback only if shim hasn't captured a clean URL), scan non-truncated URL lines.
+                        if (!capturedViaShim && cliType != "AGY") {
+                            val matchedUrl = urlRegex.find(clean)?.value
+                            if (matchedUrl != null && !matchedUrl.endsWith("=") && next.oauthUrl.isBlank()) {
+                                next = next.copy(oauthUrl = matchedUrl)
+                            }
                         }
                         if (cliType == "Codex") {
                             val codeMatch = deviceCodeRegex.find(clean)
@@ -306,28 +321,39 @@ object CliAuthManager {
             Base64.encodeToString(autoSelectEnterPrompt.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
         } else ""
         val pyScript = """
-import base64, fcntl, os, pty, select, signal, struct, sys, termios, time
-pid, fd = pty.fork()
-if pid == 0:
-    os.execvp('/bin/bash', ['/bin/bash', '-c', '$cliCommand'])
+import base64, fcntl, os, pty, select, struct, sys, termios, time
+master, fd = pty.openpty()
 try:
-    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', 40, 240, 0, 0))
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', 40, 1000, 0, 0))
 except Exception:
     pass
+pid = os.fork()
+if pid == 0:
+    os.close(master)
+    os.setsid()
+    try:
+        fcntl.ioctl(fd, termios.TIOCSCTTY, 0)
+    except Exception:
+        pass
+    os.dup2(fd, 0); os.dup2(fd, 1); os.dup2(fd, 2)
+    if fd > 2:
+        os.close(fd)
+    os.execvp('/bin/bash', ['/bin/bash', '-c', '$cliCommand'])
+os.close(fd)
 prompt_b = base64.b64decode('$promptLiteral') if '$promptLiteral' else b''
 sent_enter = False
 buf_acc = b''
 while True:
-    rlist = [fd]
+    rlist = [master]
     if not sys.stdin.closed:
         rlist.append(0)
     try:
         r, _, _ = select.select(rlist, [], [], 0.25)
     except Exception:
         break
-    if fd in r:
+    if master in r:
         try:
-            data = os.read(fd, 4096)
+            data = os.read(master, 8192)
         except OSError:
             break
         if not data:
@@ -339,14 +365,14 @@ while True:
                 sent_enter = True
                 time.sleep(0.35)
                 try:
-                    os.write(fd, b'\r')
+                    os.write(master, b'\r')
                 except OSError:
                     pass
     if 0 in r:
         try:
             inp = os.read(0, 1024)
             if inp:
-                os.write(fd, inp)
+                os.write(master, inp)
         except OSError:
             pass
 _, status = os.waitpid(pid, 0)
