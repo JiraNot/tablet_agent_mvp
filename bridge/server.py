@@ -65,7 +65,7 @@ class Handler(BaseHTTPRequestHandler):
         if seg==['v1','tasks']:
             if method=='GET':return self.reply(200,{'tasks':self.core.tasks(q.get('project',[None])[0])})
             if method=='POST':
-                obj=self._body();return self.reply(202,self.core.start_task(str(obj.get('project','')),str(obj.get('prompt','')),str(obj.get('mode','build')),str(obj.get('agent','codex')),str(obj.get('model',''))))
+                obj=self._body();return self.reply(202,self.core.start_task(str(obj.get('project','')),str(obj.get('prompt','')),str(obj.get('mode','build')),str(obj.get('agent','codex')),str(obj.get('model','')),str(obj.get('task_id','')) or None))
         if len(seg)>=3 and seg[:2]==['v1','tasks']:
             tid=seg[2]
             if len(seg)==3 and method=='GET':return self.reply(200,self.core.task(tid))

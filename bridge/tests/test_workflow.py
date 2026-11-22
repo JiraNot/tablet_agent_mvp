@@ -69,4 +69,19 @@ print('Build succeeded')
         self.assertNotIn('resume',calls[0])
         self.assertIn('resume',calls[1])
 
+    def test_followup_in_same_task_appends_user_turn_and_keeps_task_id(self):
+        with patch.dict(os.environ,self.env):
+            first=self.core.start_task('project','First plan','plan')
+            self.assertEqual(self.until_terminal(first['id']),'PLANNED')
+            continued=self.core.start_task('project','Follow-up question','plan',task_id=first['id'])
+            self.assertEqual(continued['id'],first['id'])
+            self.assertEqual(self.until_terminal(first['id']),'PLANNED')
+            tasks=self.core.tasks('project')
+            self.assertEqual(len(tasks),1)
+            self.assertEqual(tasks[0]['prompt'],'First plan')
+            events=self.core.events_page(first['id'],0)['events']
+            user_events=[e for e in events if e['kind']=='user']
+            self.assertEqual(len(user_events),1)
+            self.assertEqual(user_events[0]['message'],'Follow-up question')
+
 if __name__=='__main__':unittest.main()

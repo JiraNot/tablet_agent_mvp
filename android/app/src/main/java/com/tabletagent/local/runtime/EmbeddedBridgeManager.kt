@@ -81,9 +81,10 @@ object EmbeddedBridgeManager {
     }
 
     /** Copy bundled core.py and server.py from APK assets into PRoot /opt/tablet-agent. */
-    fun syncBridgeScripts(context: Context) {
+    fun syncBridgeScripts(context: Context): Boolean {
         val rootfs = BootstrapManager.getRootfsDir(context)
         val targetDir = File(rootfs, "opt/tablet-agent").apply { mkdirs() }
+        var anyChanged = false
         for (name in listOf("core.py", "server.py")) {
             val assetBytes = context.assets.open("bridge/$name").use { it.readBytes() }
             val dest = File(targetDir, name)
@@ -92,8 +93,10 @@ object EmbeddedBridgeManager {
             if (changed) {
                 dest.writeBytes(assetBytes)
                 dest.setReadable(true, false)
+                anyChanged = true
             }
         }
+        return anyChanged
     }
 
     private fun probeHealthRuntime(port: Int): String? {
@@ -123,28 +126,39 @@ object EmbeddedBridgeManager {
 
             BootstrapManager.ensureRuntimeDirs(context)
             ensureDeviceToken(context)
-            syncBridgeScripts(context)
+            val scriptsChanged = syncBridgeScripts(context)
+            if (scriptsChanged) {
+                stopInternal()
+                runCatching {
+                    EmbeddedProcessRunner.execute(
+                        context = context,
+                        command = "pkill -f /opt/tablet-agent/server.py",
+                        timeoutMs = 3_000L
+                    )
+                    delay(400)
+                }
+            }
 
             val currentPort = _port.value
             val currentProc = daemonProcess
-            if (currentProc != null && currentProc.isAlive && probeHealthRuntime(currentPort) == "embedded") {
+            if (!scriptsChanged && currentProc != null && currentProc.isAlive && probeHealthRuntime(currentPort) == "embedded") {
                 _status.value = EmbeddedBridgeStatus.Running(currentPort)
                 return@withContext true
             }
 
             // Pick canonical port 8765 unless occupied by external Termux bridge, then fallback to 8766.
             val health8765 = probeHealthRuntime(DEFAULT_PORT)
-            if (health8765 == "embedded") {
+            if (!scriptsChanged && health8765 == "embedded") {
                 _port.value = DEFAULT_PORT
                 _status.value = EmbeddedBridgeStatus.Running(DEFAULT_PORT)
                 return@withContext true
             }
 
-            val targetPort = if (health8765 == null) {
+            val targetPort = if (health8765 == null || health8765 == "embedded") {
                 DEFAULT_PORT
             } else {
                 val healthFallback = probeHealthRuntime(FALLBACK_PORT)
-                if (healthFallback == "embedded") {
+                if (!scriptsChanged && healthFallback == "embedded") {
                     _port.value = FALLBACK_PORT
                     _status.value = EmbeddedBridgeStatus.Running(FALLBACK_PORT)
                     return@withContext true

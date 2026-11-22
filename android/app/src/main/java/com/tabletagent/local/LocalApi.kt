@@ -55,8 +55,8 @@ class LocalApi(private val deviceToken: String, port: Int = 8765) {
         JSONObject().put("name", name).put("git_url", url))
     suspend fun tasks(project: String): JSONArray = request("GET", "/v1/tasks?project=${encode(project)}").getJSONArray("tasks")
     suspend fun agents(): JSONArray = request("GET", "/v1/agents").getJSONArray("agents")
-    suspend fun startTask(project: String, prompt: String, mode: String, agent: String = "codex", model: String = ""): JSONObject = request("POST", "/v1/tasks",
-        JSONObject().put("project", project).put("prompt", prompt).put("mode", mode).put("agent", agent).put("model", model))
+    suspend fun startTask(project: String, prompt: String, mode: String, agent: String = "codex", model: String = "", taskId: String = ""): JSONObject = request("POST", "/v1/tasks",
+        JSONObject().put("project", project).put("prompt", prompt).put("mode", mode).put("agent", agent).put("model", model).put("task_id", taskId))
     suspend fun eventsPage(taskId: String, after: Int): JSONObject = request("GET", "/v1/tasks/${encode(taskId)}/events?after=$after")
     suspend fun events(taskId: String, after: Int): JSONArray = eventsPage(taskId, after).getJSONArray("events")
     suspend fun settings(): JSONObject = request("GET", "/v1/settings")

@@ -6,15 +6,20 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.HelpOutline
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -22,9 +27,14 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.tabletagent.local.runtime.AllCliAuthStatus
@@ -94,6 +104,8 @@ fun TabletAgentApp() {
     var darkTheme by rememberSaveable { mutableStateOf(false) }
     var sidebarOpen by rememberSaveable { mutableStateOf(true) }
     var isNewChatMode by rememberSaveable { mutableStateOf(false) }
+    var splitRatio by rememberSaveable { mutableFloatStateOf(0.50f) }
+    var cloningProject by remember { mutableStateOf(false) }
     var online by remember { mutableStateOf(false) }
     var projects by remember { mutableStateOf<List<JSONObject>>(emptyList()) }
     var selectedProject by rememberSaveable { mutableStateOf("") }
@@ -148,6 +160,7 @@ fun TabletAgentApp() {
     LaunchedEffect(oauthState.completed) {
         if (oauthState.completed && BootstrapManager.isReady(context)) {
             cliAuthStatus = CliAuthManager.getAuthStatus(context)
+            keySummary = SecureSecrets.getSummary(context)
         }
     }
 
@@ -316,7 +329,10 @@ fun TabletAgentApp() {
                         online = online,
                         bridgePort = bridgePort,
                         workspaceView = tab,
-                        onSelectWorkspaceView = { tab = it },
+                        onSelectWorkspaceView = { nextView ->
+                            tab = nextView
+                            if (nextView == 2) sidebarOpen = false
+                        },
                         onOpenGit = { gitReviewDialog = true }
                     )
                     Column(Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 8.dp)) {
@@ -352,6 +368,25 @@ fun TabletAgentApp() {
                             }
                             Spacer(Modifier.height(6.dp))
                         }
+                        val createOrCloneHandler: (String, String) -> Unit = { name, gitUrl ->
+                            scope.launch {
+                                cloningProject = true
+                                error = if (gitUrl.isNotBlank()) "Cloning $gitUrl into $name…" else "Creating workspace $name…"
+                                runCatching { api.createProject(name.trim(), gitUrl.trim()) }
+                                    .onSuccess {
+                                        val projArr = api.projects()
+                                        lastProjectsRaw = projArr.toString()
+                                        projects = projArr.objects()
+                                        selectedProject = name.trim()
+                                        selectedTask = ""
+                                        events = emptyList()
+                                        eventCursor = 0
+                                        error = if (gitUrl.isNotBlank()) "Cloned $name successfully" else "Created project $name"
+                                    }
+                                    .onFailure { notify(it) }
+                                cloningProject = false
+                            }
+                        }
                         when (tab) {
                             0 -> AionClaudeAgentPane(
                                 prompt = prompt, onPrompt = { prompt = it },
@@ -363,6 +398,9 @@ fun TabletAgentApp() {
                                 onSelectProject = { name ->
                                     selectedProject = name; selectedTask = ""; events = emptyList(); eventCursor = 0; fileDir = "."; fileName = ""
                                 },
+                                onCreateOrCloneProject = createOrCloneHandler,
+                                onSignInGitHub = { CliAuthManager.startOAuthLogin(context, "GitHub") },
+                                cloningProject = cloningProject,
                                 onOpenSettings = { tab = 4 },
                                 tasks = tasks, selectedTask = selectedTask,
                                 isNewChatMode = isNewChatMode,
@@ -372,7 +410,8 @@ fun TabletAgentApp() {
                                 onSend = {
                                     scope.launch {
                                         try {
-                                            val t = api.startTask(selectedProject, prompt, mode, selectedAgent, if (selectedModel == "default") "" else selectedModel)
+                                            val continueTid = if (isNewChatMode) "" else selectedTask
+                                            val t = api.startTask(selectedProject, prompt, mode, selectedAgent, if (selectedModel == "default") "" else selectedModel, continueTid)
                                             val taskId = t.getString("id")
                                             selectedTask = taskId
                                             isNewChatMode = false
@@ -409,72 +448,108 @@ fun TabletAgentApp() {
                                 },
                                 onCommitClick = { gitReviewDialog = true }
                             )
-                            1 -> Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                Box(Modifier.weight(0.52f).fillMaxHeight()) {
-                                    AionClaudeAgentPane(
-                                        prompt = prompt, onPrompt = { prompt = it },
-                                        mode = mode, onMode = { mode = it },
-                                        agents = availableAgents, selectedAgent = selectedAgent, onSelectAgent = { selectedAgent = it },
-                                        selectedModel = selectedModel, onSelectModel = { selectedModel = it },
-                                        cliAuthStatus = cliAuthStatus, isEmbeddedRuntime = isRuntimeReady,
-                                        selectedProject = selectedProject, projects = projects,
-                                        onSelectProject = { name ->
-                                            selectedProject = name; selectedTask = ""; events = emptyList(); eventCursor = 0; fileDir = "."; fileName = ""
-                                        },
-                                        onOpenSettings = { tab = 4 },
-                                        tasks = tasks, selectedTask = selectedTask,
-                                        isNewChatMode = isNewChatMode,
-                                        onNewChat = { selectedTask = ""; isNewChatMode = true; events = emptyList(); eventCursor = 0 },
-                                        events = events, approvals = approvals,
-                                        canRun = online && token.isNotBlank() && selectedProject.isNotBlank(),
-                                        onSend = {
-                                            scope.launch {
-                                                try {
-                                                    val t = api.startTask(selectedProject, prompt, mode, selectedAgent, if (selectedModel == "default") "" else selectedModel)
-                                                    val taskId = t.getString("id")
-                                                    selectedTask = taskId
-                                                    isNewChatMode = false
-                                                    AgentForegroundService.start(context, taskId, selectedProject, mode.uppercase(), prompt)
-                                                    prompt = ""; error = ""
-                                                    tasks = api.tasks(selectedProject).objects()
-                                                } catch (e: Exception) { notify(e) }
+                            1 -> BoxWithConstraints(Modifier.fillMaxSize()) {
+                                val density = LocalDensity.current
+                                val totalWidthPx = with(density) { maxWidth.toPx().coerceAtLeast(1f) }
+                                Row(Modifier.fillMaxSize()) {
+                                    Box(Modifier.weight(splitRatio).fillMaxHeight()) {
+                                        AionClaudeAgentPane(
+                                            prompt = prompt, onPrompt = { prompt = it },
+                                            mode = mode, onMode = { mode = it },
+                                            agents = availableAgents, selectedAgent = selectedAgent, onSelectAgent = { selectedAgent = it },
+                                            selectedModel = selectedModel, onSelectModel = { selectedModel = it },
+                                            cliAuthStatus = cliAuthStatus, isEmbeddedRuntime = isRuntimeReady,
+                                            selectedProject = selectedProject, projects = projects,
+                                            onSelectProject = { name ->
+                                                selectedProject = name; selectedTask = ""; events = emptyList(); eventCursor = 0; fileDir = "."; fileName = ""
+                                            },
+                                            onCreateOrCloneProject = createOrCloneHandler,
+                                            onSignInGitHub = { CliAuthManager.startOAuthLogin(context, "GitHub") },
+                                            cloningProject = cloningProject,
+                                            onOpenSettings = { tab = 4 },
+                                            tasks = tasks, selectedTask = selectedTask,
+                                            isNewChatMode = isNewChatMode,
+                                            onNewChat = { selectedTask = ""; isNewChatMode = true; events = emptyList(); eventCursor = 0 },
+                                            events = events, approvals = approvals,
+                                            canRun = online && token.isNotBlank() && selectedProject.isNotBlank(),
+                                            onSend = {
+                                                scope.launch {
+                                                    try {
+                                                        val continueTid = if (isNewChatMode) "" else selectedTask
+                                                        val t = api.startTask(selectedProject, prompt, mode, selectedAgent, if (selectedModel == "default") "" else selectedModel, continueTid)
+                                                        val taskId = t.getString("id")
+                                                        selectedTask = taskId
+                                                        isNewChatMode = false
+                                                        AgentForegroundService.start(context, taskId, selectedProject, mode.uppercase(), prompt)
+                                                        prompt = ""; error = ""
+                                                        tasks = api.tasks(selectedProject).objects()
+                                                    } catch (e: Exception) { notify(e) }
+                                                }
+                                            },
+                                            onCancel = {
+                                                scope.launch {
+                                                    runCatching {
+                                                        api.cancelTask(selectedTask)
+                                                        AgentForegroundService.stop(context)
+                                                        tasks = api.tasks(selectedProject).objects()
+                                                    }.onFailure { notify(it) }
+                                                }
+                                            },
+                                            onApprove = { aid ->
+                                                scope.launch {
+                                                    runCatching {
+                                                        api.respondApproval(selectedTask, aid, true)
+                                                        approvals = api.approvals(selectedTask).objects()
+                                                    }.onFailure { notify(it) }
+                                                }
+                                            },
+                                            onDeny = { aid ->
+                                                scope.launch {
+                                                    runCatching {
+                                                        api.respondApproval(selectedTask, aid, false)
+                                                        approvals = api.approvals(selectedTask).objects()
+                                                    }.onFailure { notify(it) }
+                                                }
+                                            },
+                                            onCommitClick = { gitReviewDialog = true }
+                                        )
+                                    }
+
+                                    // Draggable Split Divider Handle
+                                    Box(
+                                        contentAlignment = Alignment.Center,
+                                        modifier = Modifier
+                                            .fillMaxHeight()
+                                            .width(16.dp)
+                                            .pointerInput(totalWidthPx) {
+                                                detectHorizontalDragGestures { change, dragAmount ->
+                                                    change.consume()
+                                                    splitRatio = (splitRatio + dragAmount / totalWidthPx).coerceIn(0.26f, 0.74f)
+                                                }
                                             }
-                                        },
-                                        onCancel = {
-                                            scope.launch {
-                                                runCatching {
-                                                    api.cancelTask(selectedTask)
-                                                    AgentForegroundService.stop(context)
-                                                    tasks = api.tasks(selectedProject).objects()
-                                                }.onFailure { notify(it) }
-                                            }
-                                        },
-                                        onApprove = { aid ->
-                                            scope.launch {
-                                                runCatching {
-                                                    api.respondApproval(selectedTask, aid, true)
-                                                    approvals = api.approvals(selectedTask).objects()
-                                                }.onFailure { notify(it) }
-                                            }
-                                        },
-                                        onDeny = { aid ->
-                                            scope.launch {
-                                                runCatching {
-                                                    api.respondApproval(selectedTask, aid, false)
-                                                    approvals = api.approvals(selectedTask).objects()
-                                                }.onFailure { notify(it) }
-                                            }
-                                        },
-                                        onCommitClick = { gitReviewDialog = true }
-                                    )
-                                }
-                                Box(Modifier.weight(0.48f).fillMaxHeight()) {
-                                    PreviewScreen(
-                                        previewUrl, previewState,
-                                        onStart = { scope.launch { runCatching { val p = api.previewStart(selectedProject); previewUrl = p.optString("url", ""); previewState = p.optString("status", "starting") }.onFailure { notify(it) } } },
-                                        onStop = { scope.launch { runCatching { api.previewStop(selectedProject); previewState = "stopped"; previewUrl = "" }.onFailure { notify(it) } } },
-                                        enabled = online && selectedProject.isNotBlank()
-                                    )
+                                    ) {
+                                        Box(
+                                            Modifier
+                                                .fillMaxHeight()
+                                                .width(1.dp)
+                                                .background(MaterialTheme.colorScheme.outlineVariant)
+                                        )
+                                        Surface(
+                                            color = MaterialTheme.colorScheme.surfaceVariant,
+                                            shape = RoundedCornerShape(50),
+                                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                                            modifier = Modifier.width(6.dp).height(44.dp)
+                                        ) {}
+                                    }
+
+                                    Box(Modifier.weight(1f - splitRatio).fillMaxHeight()) {
+                                        PreviewScreen(
+                                            previewUrl, previewState,
+                                            onStart = { scope.launch { runCatching { val p = api.previewStart(selectedProject); previewUrl = p.optString("url", ""); previewState = p.optString("status", "starting") }.onFailure { notify(it) } } },
+                                            onStop = { scope.launch { runCatching { api.previewStop(selectedProject); previewState = "stopped"; previewUrl = "" }.onFailure { notify(it) } } },
+                                            enabled = online && selectedProject.isNotBlank()
+                                        )
+                                    }
                                 }
                             }
                             2 -> PreviewScreen(
@@ -589,24 +664,158 @@ fun TabletAgentApp() {
             onCancel = { CliAuthManager.cancelOAuth() },
             onDone = {
                 CliAuthManager.cancelOAuth()
-                scope.launch { cliAuthStatus = CliAuthManager.getAuthStatus(context) }
+                scope.launch {
+                    cliAuthStatus = CliAuthManager.getAuthStatus(context)
+                    keySummary = SecureSecrets.getSummary(context)
+                }
             }
         )
     }
     if (createDialog) {
+        var dialogTab by remember { mutableIntStateOf(0) }
         var name by remember { mutableStateOf("") }
         var gitUrl by remember { mutableStateOf("") }
-        AlertDialog(onDismissRequest = { createDialog = false },
-            title = { Text("Create or clone project") },
-            text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Project folder name") }, singleLine = true)
-                OutlinedTextField(value = gitUrl, onValueChange = { gitUrl = it }, label = { Text("GitHub HTTPS URL (optional)") }, maxLines = 2)
-            } },
-            confirmButton = { TextButton(onClick = { scope.launch {
-                runCatching { api.createProject(name.trim(), gitUrl.trim()) }
-                    .onSuccess { selectedProject = name.trim(); createDialog = false; projects = api.projects().objects() }
-                    .onFailure { notify(it) }
-            } }) { Text("Create") } },
+        var userRepos by remember { mutableStateOf<List<com.tabletagent.local.runtime.GitHubRepoItem>>(emptyList()) }
+        var loadingRepos by remember { mutableStateOf(false) }
+        var repoSearch by remember { mutableStateOf("") }
+        val ghSignedIn = cliAuthStatus.github.signedIn
+
+        LaunchedEffect(dialogTab, ghSignedIn) {
+            if (dialogTab == 0 && ghSignedIn) {
+                loadingRepos = true
+                CliAuthManager.fetchGitHubUserRepos(context)
+                    .onSuccess { userRepos = it }
+                loadingRepos = false
+            }
+        }
+
+        AlertDialog(
+            onDismissRequest = { createDialog = false },
+            title = { Text("Open or Clone Project") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        FilterChip(
+                            selected = dialogTab == 0,
+                            onClick = { dialogTab = 0 },
+                            label = { Text("Your GitHub Repos") },
+                            leadingIcon = { Icon(Icons.Default.CloudDownload, null, Modifier.size(16.dp)) }
+                        )
+                        FilterChip(
+                            selected = dialogTab == 1,
+                            onClick = { dialogTab = 1 },
+                            label = { Text("GitHub URL / New") },
+                            leadingIcon = { Icon(Icons.Default.CreateNewFolder, null, Modifier.size(16.dp)) }
+                        )
+                    }
+
+                    if (dialogTab == 0) {
+                        if (!ghSignedIn) {
+                            Surface(
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Text("Sign in to GitHub to browse & clone your repositories", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                                    Text("Authorize once via GitHub Device OAuth to see both your public and private repositories.", style = MaterialTheme.typography.bodySmall)
+                                    Button(onClick = { CliAuthManager.startOAuthLogin(context, "GitHub") }) {
+                                        Icon(Icons.Default.Login, null, Modifier.size(16.dp))
+                                        Spacer(Modifier.width(6.dp))
+                                        Text("Sign in to GitHub")
+                                    }
+                                }
+                            }
+                        } else {
+                            OutlinedTextField(
+                                value = repoSearch,
+                                onValueChange = { repoSearch = it },
+                                label = { Text("Search ${cliAuthStatus.github.label} repos") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            if (loadingRepos) {
+                                LinearProgressIndicator(Modifier.fillMaxWidth())
+                            }
+                            val filtered = userRepos.filter {
+                                repoSearch.isBlank() || it.fullName.contains(repoSearch, ignoreCase = true)
+                            }
+                            Column(
+                                modifier = Modifier.fillMaxWidth().heightIn(max = 220.dp).verticalScroll(rememberScrollState()),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                filtered.forEach { repo ->
+                                    Surface(
+                                        onClick = {
+                                            val safeName = repo.name.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+                                            name = safeName
+                                            gitUrl = repo.cloneUrl
+                                            dialogTab = 1
+                                        },
+                                        color = MaterialTheme.colorScheme.surfaceVariant,
+                                        shape = RoundedCornerShape(8.dp),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(if (repo.isPrivate) Icons.Default.Lock else Icons.Default.Public, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+                                            Spacer(Modifier.width(8.dp))
+                                            Column(Modifier.weight(1f)) {
+                                                Text(repo.fullName, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                                                if (repo.description.isNotBlank()) {
+                                                    Text(repo.description, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                                }
+                                            }
+                                            Text("Select", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        OutlinedTextField(
+                            value = gitUrl,
+                            onValueChange = { url ->
+                                gitUrl = url
+                                val derived = url.trim().removeSuffix("/").removeSuffix(".git").substringAfterLast('/')
+                                if (derived.isNotBlank() && !derived.contains("github.com")) {
+                                    name = derived.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+                                }
+                            },
+                            label = { Text("GitHub HTTPS URL (leave blank for new project)") },
+                            placeholder = { Text("https://github.com/owner/repo.git") },
+                            maxLines = 2,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        OutlinedTextField(
+                            value = name,
+                            onValueChange = { name = it },
+                            label = { Text("Project folder name") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                if (dialogTab == 1) {
+                    Button(
+                        onClick = {
+                            scope.launch {
+                                runCatching { api.createProject(name.trim(), gitUrl.trim()) }
+                                    .onSuccess {
+                                        selectedProject = name.trim()
+                                        createDialog = false
+                                        projects = api.projects().objects()
+                                    }
+                                    .onFailure { notify(it) }
+                            }
+                        },
+                        enabled = name.isNotBlank()
+                    ) {
+                        Text(if (gitUrl.isNotBlank()) "Clone & Open" else "Create Project")
+                    }
+                }
+            },
             dismissButton = { TextButton(onClick = { createDialog = false }) { Text("Cancel") } }
         )
     }
@@ -933,27 +1142,131 @@ private fun AgentScreen(prompt: String, onPrompt: (String) -> Unit, mode: String
 @Composable
 private fun PreviewScreen(url: String, status: String, onStart: () -> Unit, onStop: () -> Unit, enabled: Boolean) {
     var refreshTick by remember { mutableIntStateOf(0) }
-    var viewportMode by remember { mutableStateOf("full") }
+    var viewportMode by rememberSaveable { mutableStateOf("full") }
+    var toolbarCollapsed by rememberSaveable { mutableStateOf(false) }
+
     Column(Modifier.fillMaxSize()) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Live preview", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-            Text(status, style = MaterialTheme.typography.labelSmall)
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
+            shape = RoundedCornerShape(10.dp),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)
+            ) {
+                // Status Dot
+                Box(
+                    Modifier
+                        .size(8.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (status == "running") MaterialTheme.colorScheme.tertiary
+                            else MaterialTheme.colorScheme.outline
+                        )
+                )
+                Spacer(Modifier.width(6.dp))
+
+                // Start / Stop Icon Button
+                if (status == "stopped") {
+                    FilledTonalIconButton(
+                        onClick = onStart,
+                        enabled = enabled,
+                        modifier = Modifier.size(30.dp)
+                    ) {
+                        Icon(Icons.Default.PlayArrow, contentDescription = "Start dev server", modifier = Modifier.size(16.dp))
+                    }
+                } else {
+                    FilledTonalIconButton(
+                        onClick = onStop,
+                        enabled = enabled,
+                        colors = IconButtonDefaults.filledTonalIconButtonColors(
+                            containerColor = MaterialTheme.colorScheme.errorContainer,
+                            contentColor = MaterialTheme.colorScheme.error
+                        ),
+                        modifier = Modifier.size(30.dp)
+                    ) {
+                        Icon(Icons.Default.Stop, contentDescription = "Stop dev server", modifier = Modifier.size(16.dp))
+                    }
+                }
+
+                Spacer(Modifier.width(4.dp))
+
+                // Reload Icon Button
+                IconButton(
+                    onClick = { refreshTick++ },
+                    enabled = url.isNotBlank(),
+                    modifier = Modifier.size(30.dp)
+                ) {
+                    Icon(Icons.Default.Refresh, contentDescription = "Reload", modifier = Modifier.size(16.dp))
+                }
+
+                if (!toolbarCollapsed) {
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        if (url.isNotBlank()) url else "npm run dev ($status)",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                } else {
+                    Spacer(Modifier.weight(1f))
+                }
+
+                // Tight Grouped Responsive Viewport Icon Pill [ Desktop | Tablet | Phone ]
+                Surface(
+                    color = MaterialTheme.colorScheme.surface,
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(2.dp)
+                    ) {
+                        listOf(
+                            Triple("full", Icons.Default.DesktopWindows, "Full width"),
+                            Triple("tablet", Icons.Default.TabletMac, "Tablet (768dp)"),
+                            Triple("mobile", Icons.Default.PhoneAndroid, "Phone (375dp)")
+                        ).forEach { (modeKey, icon, desc) ->
+                            val selected = viewportMode == modeKey
+                            Surface(
+                                onClick = { viewportMode = modeKey },
+                                color = if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+                                shape = RoundedCornerShape(6.dp),
+                                modifier = Modifier.size(28.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        icon,
+                                        contentDescription = desc,
+                                        tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Spacer(Modifier.width(4.dp))
+
+                // Collapse / Expand URL details toggle
+                IconButton(
+                    onClick = { toolbarCollapsed = !toolbarCollapsed },
+                    modifier = Modifier.size(28.dp)
+                ) {
+                    Icon(
+                        if (toolbarCollapsed) Icons.Default.UnfoldMore else Icons.Default.UnfoldLess,
+                        contentDescription = "Toggle preview toolbar",
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
         }
-        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically) {
-            Button(onClick = onStart, enabled = enabled && status == "stopped") { Text("Start dev server") }
-            Spacer(Modifier.width(6.dp))
-            OutlinedButton(onClick = onStop, enabled = enabled && status != "stopped") { Text("Stop") }
-            Spacer(Modifier.width(6.dp))
-            OutlinedButton(onClick = { refreshTick++ }, enabled = url.isNotBlank()) { Text("Reload") }
-            Spacer(Modifier.width(10.dp))
-            FilterChip(selected = viewportMode == "full", onClick = { viewportMode = "full" }, label = { Text("Full") })
-            Spacer(Modifier.width(4.dp))
-            FilterChip(selected = viewportMode == "tablet", onClick = { viewportMode = "tablet" }, label = { Text("Tablet (768dp)") })
-            Spacer(Modifier.width(4.dp))
-            FilterChip(selected = viewportMode == "mobile", onClick = { viewportMode = "mobile" }, label = { Text("Phone (375dp)") })
-        }
-        Spacer(Modifier.height(6.dp))
-        Text(if (url.isNotBlank()) url else "Run npm dev to see your project", style = MaterialTheme.typography.bodySmall)
+
         Spacer(Modifier.height(6.dp))
         if (url.startsWith("http://127.0.0.1:")) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
@@ -965,7 +1278,29 @@ private fun PreviewScreen(url: String, status: String, onStart: () -> Unit, onSt
                 key(url, refreshTick) { LocalPreview(url, previewMod) }
             }
         } else {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("No local preview yet") }
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                shape = RoundedCornerShape(12.dp),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                Column(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.Center,
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Icon(
+                        Icons.Default.Devices,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(32.dp)
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text("No local preview running", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(4.dp))
+                    Text("Tap ▶ above to start npm run dev", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
         }
     }
 }
@@ -1106,26 +1441,36 @@ private fun SettingsScreen(
         }
     }
 
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text("Settings & Diagnostics", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(
-            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
         ) {
-            listOf(
-                Triple("Runtime", Icons.Default.Tune, 0),
-                Triple("Agent CLIs", Icons.Default.SmartToy, 1),
-                Triple("Instructions", Icons.Default.Description, 2),
-                Triple("Security", Icons.Default.Security, 3),
-                Triple("Walkthrough", Icons.Default.HelpOutline, 4)
-            ).forEach { (label, icon, idx) ->
-                FilterChip(
-                    selected = section == idx,
-                    onClick = { section = idx },
-                    label = { Text(label) },
-                    leadingIcon = { Icon(icon, null, Modifier.size(16.dp)) }
-                )
+            Text(
+                "Settings & Diagnostics",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(end = 12.dp)
+            )
+            Row(
+                Modifier.weight(1f).horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                listOf(
+                    Triple("Runtime", Icons.Default.Tune, 0),
+                    Triple("Agents & Git", Icons.Default.SmartToy, 1),
+                    Triple("Instructions", Icons.Default.Description, 2),
+                    Triple("Security", Icons.Default.Security, 3),
+                    Triple("Guide", Icons.AutoMirrored.Filled.HelpOutline, 4)
+                ).forEach { (label, icon, idx) ->
+                    FilterChip(
+                        selected = section == idx,
+                        onClick = { section = idx },
+                        label = { Text(label, style = MaterialTheme.typography.labelSmall) },
+                        leadingIcon = { Icon(icon, null, Modifier.size(14.dp)) },
+                        modifier = Modifier.height(30.dp)
+                    )
+                }
             }
         }
 
@@ -1133,181 +1478,179 @@ private fun SettingsScreen(
 
         when (section) {
             0 -> {
-                Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = MaterialTheme.shapes.medium) {
-                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.Memory, null, tint = MaterialTheme.colorScheme.onPrimaryContainer)
-                            Spacer(Modifier.width(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.weight(1.3f)
+                    ) {
+                        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.Memory, null, tint = MaterialTheme.colorScheme.onPrimaryContainer, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    "Embedded PRoot Runtime (Zero-Termux)",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Surface(
+                                    color = if (BootstrapManager.isReady(context)) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                                    shape = RoundedCornerShape(4.dp)
+                                ) {
+                                    Text(
+                                        if (BootstrapManager.isReady(context)) "ACTIVE" else "NOT READY",
+                                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.surface,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
                             Text(
-                                "Embedded Standalone Runtime (Zero-Termux)",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold,
+                                "PRoot 5.1 ARM64 · Alpine v3.21 · Node ${cliVersions?.node ?: "v22.23.5"} · Git ${cliVersions?.git ?: "2.47.3"} · Python ${cliVersions?.python ?: "3.12.16"}",
+                                style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onPrimaryContainer
                             )
-                            Spacer(Modifier.weight(1f))
-                            Surface(
-                                color = if (BootstrapManager.isReady(context)) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
-                                shape = MaterialTheme.shapes.extraSmall
-                            ) {
+                            val bridgeLabel = when {
+                                online && bridgeRuntime == "embedded" -> "Loopback Bridge Online (127.0.0.1:$bridgePort)"
+                                bridgeStatus is EmbeddedBridgeStatus.Starting -> "Starting Embedded PRoot Bridge…"
+                                bridgeStatus is EmbeddedBridgeStatus.Error -> "Bridge Error: ${bridgeStatus.message}"
+                                else -> "Bridge Standby (127.0.0.1:$bridgePort)"
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(
-                                    if (BootstrapManager.isReady(context)) "ACTIVE" else "NOT READY",
-                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                    bridgeLabel,
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.surface,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                FilledTonalButton(
+                                    onClick = onRestartEmbedded,
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 3.dp),
+                                    modifier = Modifier.height(28.dp)
+                                ) {
+                                    Icon(Icons.Default.Refresh, null, Modifier.size(14.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("Restart", style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
+                        }
+                    }
+
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.weight(0.9f)
+                    ) {
+                        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.VerifiedUser, null, tint = MaterialTheme.colorScheme.tertiary, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    "KeyStore AES-256 Bridge Auth",
+                                    style = MaterialTheme.typography.titleSmall,
                                     fontWeight = FontWeight.Bold
                                 )
                             }
-                        }
-                        Text(
-                            "Engine: PRoot 5.1 (Userland ARM64 with talloc & ashmem)\nRootfs: Alpine Linux v3.21 (Node.js 22, NPM 10, Git 2.47, Python 3.12)\nPath: ${BootstrapManager.getRootfsDir(context).absolutePath}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer
-                        )
-                        if (cliVersions != null) {
                             Text(
-                                "Packages: Node ${cliVersions.node ?: "v22.23.5"}, Git ${cliVersions.git ?: "2.47.3"}, Python ${cliVersions.python ?: "3.12.16"}",
+                                "Device token & API keys are hardware-encrypted in Android KeyStore and synced automatically into PRoot. No external Termux app needed.",
                                 style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.SemiBold,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        Spacer(Modifier.height(4.dp))
-                        val bridgeLabel = when {
-                            online && bridgeRuntime == "embedded" -> "Embedded Bridge Online (127.0.0.1:$bridgePort)"
-                            bridgeStatus is EmbeddedBridgeStatus.Starting -> "Starting Embedded PRoot Bridge..."
-                            bridgeStatus is EmbeddedBridgeStatus.Error -> "Embedded Bridge Error: ${bridgeStatus.message}"
-                            else -> "Embedded Bridge Standby (127.0.0.1:$bridgePort)"
-                        }
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text(
-                                bridgeLabel,
-                                style = MaterialTheme.typography.labelMedium,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                modifier = Modifier.weight(1f)
-                            )
-                            FilledTonalButton(onClick = onRestartEmbedded) {
-                                Icon(Icons.Default.Refresh, null, Modifier.size(16.dp))
-                                Spacer(Modifier.width(4.dp))
-                                Text(if (online && bridgeRuntime == "embedded") "Restart Bridge" else "Start Embedded Bridge")
-                            }
-                        }
-                    }
-                }
-
-                Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = MaterialTheme.shapes.medium) {
-                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(if (online) Icons.Default.CheckCircle else Icons.Default.Info, null,
-                                tint = if (online) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline)
-                            Spacer(Modifier.width(8.dp))
-                            Text(
-                                when {
-                                    online && bridgeRuntime == "embedded" -> "Active Mode: Zero-Termux Embedded Bridge (:$bridgePort)"
-                                    online -> "Active Mode: External Termux Bridge (:$bridgePort)"
-                                    else -> "Loopback Bridge Offline"
-                                },
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                        Text("Optional external Termux bridge fallback; primary workspace runs natively inside Embedded PRoot.", style = MaterialTheme.typography.bodySmall)
-                    }
-                }
-
-                OutlinedTextField(
-                    value = tokenEntry,
-                    onValueChange = onToken,
-                    label = { Text("Device Token (Auto-synced in KeyStore)") },
-                    visualTransformation = PasswordVisualTransformation(),
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
-                )
-
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = onSave, enabled = tokenEntry.isNotBlank()) {
-                        Icon(Icons.Default.Save, null, Modifier.size(16.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("Save Token")
-                    }
-                    OutlinedButton(onClick = onStart) {
-                        Icon(Icons.Default.PlayArrow, null, Modifier.size(16.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("Termux Fallback")
                     }
                 }
             }
 
             1 -> {
-                Text("Official Agent CLIs & Auth (Embedded PRoot)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    OfficialCliCard(
+                        title = "OpenAI Codex CLI",
+                        subtitle = cliVersions?.codex ?: "Official Codex CLI",
+                        authState = cliAuthStatus.codex,
+                        isInstalled = cliVersions?.codex != null,
+                        isInstalling = installingCli == "Codex",
+                        anyInstalling = installingCli != null || authBusy,
+                        onSignIn = { onSignInCli("Codex") },
+                        onSignOut = { onSignOutCli("Codex") },
+                        onInstallOrUpdate = { onInstallCli("Codex") }
+                    )
 
-                OfficialCliCard(
-                    title = "OpenAI Codex CLI",
-                    subtitle = cliVersions?.codex ?: "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
-                    authState = cliAuthStatus.codex,
-                    isInstalled = cliVersions?.codex != null,
-                    isInstalling = installingCli == "Codex",
-                    anyInstalling = installingCli != null || authBusy,
-                    onSignIn = { onSignInCli("Codex") },
-                    onSignOut = { onSignOutCli("Codex") },
-                    onInstallOrUpdate = { onInstallCli("Codex") }
-                )
+                    OfficialCliCard(
+                        title = "Google Antigravity CLI",
+                        subtitle = cliVersions?.agy ?: "Official Antigravity CLI (agy)",
+                        authState = cliAuthStatus.agy,
+                        isInstalled = cliVersions?.agy != null,
+                        isInstalling = installingCli == "AGY",
+                        anyInstalling = installingCli != null || authBusy,
+                        onSignIn = { onSignInCli("AGY") },
+                        onSignOut = { onSignOutCli("AGY") },
+                        onInstallOrUpdate = { onInstallCli("AGY") }
+                    )
 
-                OfficialCliCard(
-                    title = "Google Antigravity CLI",
-                    subtitle = cliVersions?.agy ?: "curl -fsSL https://antigravity.google/cli/install.sh | bash",
-                    authState = cliAuthStatus.agy,
-                    isInstalled = cliVersions?.agy != null,
-                    isInstalling = installingCli == "AGY",
-                    anyInstalling = installingCli != null || authBusy,
-                    onSignIn = { onSignInCli("AGY") },
-                    onSignOut = { onSignOutCli("AGY") },
-                    onInstallOrUpdate = { onInstallCli("AGY") }
-                )
+                    OfficialCliCard(
+                        title = "Anthropic Claude Code",
+                        subtitle = cliVersions?.claude ?: "Official Claude Code CLI",
+                        authState = cliAuthStatus.claude,
+                        isInstalled = cliVersions?.claude != null,
+                        isInstalling = installingCli == "Claude",
+                        anyInstalling = installingCli != null || authBusy,
+                        onSignIn = { onSignInCli("Claude") },
+                        onSignOut = { onSignOutCli("Claude") },
+                        onInstallOrUpdate = { onInstallCli("Claude") }
+                    )
 
-                OfficialCliCard(
-                    title = "Anthropic Claude Code",
-                    subtitle = cliVersions?.claude ?: "curl -fsSL https://claude.ai/install.sh | bash",
-                    authState = cliAuthStatus.claude,
-                    isInstalled = cliVersions?.claude != null,
-                    isInstalling = installingCli == "Claude",
-                    anyInstalling = installingCli != null || authBusy,
-                    onSignIn = { onSignInCli("Claude") },
-                    onSignOut = { onSignOutCli("Claude") },
-                    onInstallOrUpdate = { onInstallCli("Claude") }
-                )
+                    OfficialCliCard(
+                        title = "GitHub Account (Git Clone)",
+                        subtitle = "GitHub OAuth Device Login for cloning private repositories (${cliVersions?.git ?: "git 2.47.3"})",
+                        authState = cliAuthStatus.github,
+                        isInstalled = true,
+                        isInstalling = false,
+                        anyInstalling = installingCli != null || authBusy,
+                        onSignIn = { onSignInCli("GitHub") },
+                        onSignOut = { onSignOutCli("GitHub") },
+                        onInstallOrUpdate = null
+                    )
 
-                ProviderApiKeysCard(
-                    summary = keySummary,
-                    busy = authBusy,
-                    onSaveKey = onSaveProviderKey
-                )
+                    ProviderApiKeysCard(
+                        summary = keySummary,
+                        busy = authBusy,
+                        onSaveKey = onSaveProviderKey
+                    )
 
-                Spacer(Modifier.height(8.dp))
-                Text("Installed Agent Capabilities (Bridge):", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-                if (agents.isEmpty()) {
-                    Text("No agent capability metadata from bridge. Embedded PRoot agents are active.", style = MaterialTheme.typography.bodySmall)
-                } else {
-                    agents.forEach { a ->
-                        val display = a.optString("display_name")
-                        val avail = a.optBoolean("available", false)
-                        val canPlan = a.optBoolean("can_plan", false)
-                        val canBuild = a.optBoolean("can_build", false)
-                        val resume = a.optBoolean("supports_resume", false)
-
-                        Surface(
-                            color = MaterialTheme.colorScheme.surfaceContainerHighest,
-                            shape = MaterialTheme.shapes.small,
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)
+                    if (agents.isNotEmpty()) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(display, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-                                    Spacer(Modifier.weight(1f))
-                                    Text(if (avail) "ONLINE" else "OFFLINE", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                            Text("Bridge Adapters:", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                            agents.forEach { a ->
+                                val display = a.optString("display_name")
+                                val avail = a.optBoolean("available", false)
+                                Surface(
+                                    color = MaterialTheme.colorScheme.surfaceVariant,
+                                    shape = RoundedCornerShape(6.dp)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                    ) {
+                                        Box(
+                                            Modifier.size(6.dp).clip(CircleShape).background(
+                                                if (avail) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.outline
+                                            )
+                                        )
+                                        Spacer(Modifier.width(5.dp))
+                                        Text(display, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Medium)
+                                    }
                                 }
-                                Text("Capabilities: ${listOfNotNull(if (canPlan) "Plan" else null, if (canBuild) "Build" else null, if (resume) "Session Resume" else null).joinToString(", ")}",
-                                    style = MaterialTheme.typography.bodySmall)
                             }
                         }
                     }
@@ -1315,22 +1658,14 @@ private fun SettingsScreen(
             }
 
             2 -> {
-                Text("Per-Project Instructions (${instructionFile})", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                if (selectedProject.isBlank()) {
-                    Text("Select a project from the top bar to inspect or edit instructions.", style = MaterialTheme.typography.bodyMedium)
-                } else {
-                    Text("Instructions in AGENTS.md or CLAUDE.md are automatically injected into the agent context.", style = MaterialTheme.typography.bodySmall)
-                    if (loadingInstructions) {
-                        CircularProgressIndicator(Modifier.padding(16.dp))
-                    } else {
-                        OutlinedTextField(
-                            value = instructionContent,
-                            onValueChange = { instructionContent = it },
-                            label = { Text(instructionFile) },
-                            placeholder = { Text("# Project Development Guidelines\n\n- Build using npm run build\n- Test with npm test") },
-                            modifier = Modifier.fillMaxWidth().heightIn(min = 180.dp),
-                            maxLines = 10
-                        )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "Per-Project Instructions ($instructionFile)",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.weight(1f)
+                    )
+                    if (selectedProject.isNotBlank()) {
                         Button(
                             onClick = {
                                 if (api != null && selectedProject.isNotBlank()) {
@@ -1342,87 +1677,128 @@ private fun SettingsScreen(
                                     }
                                 }
                             },
-                            modifier = Modifier.padding(top = 6.dp)
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                            modifier = Modifier.height(30.dp)
                         ) {
-                            Icon(Icons.Default.Save, null, Modifier.size(16.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text("Save Instructions")
+                            Icon(Icons.Default.Save, null, Modifier.size(14.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Save", style = MaterialTheme.typography.labelSmall)
                         }
                     }
+                }
+                if (selectedProject.isBlank()) {
+                    Text("Select a project from the sidebar to inspect or edit instructions.", style = MaterialTheme.typography.bodySmall)
+                } else if (loadingInstructions) {
+                    CircularProgressIndicator(Modifier.padding(12.dp).size(20.dp))
+                } else {
+                    OutlinedTextField(
+                        value = instructionContent,
+                        onValueChange = { instructionContent = it },
+                        label = { Text("$selectedProject / $instructionFile (auto-injected into prompts)") },
+                        placeholder = { Text("# Project Guidelines\n- Build: npm run build\n- Test: npm test") },
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 140.dp),
+                        textStyle = MaterialTheme.typography.bodySmall,
+                        maxLines = 8
+                    )
                 }
             }
 
             3 -> {
-                Text("Security Policies & Sandboxing", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                 Surface(
                     color = if (codexProotBypass) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.surfaceVariant,
-                    shape = MaterialTheme.shapes.medium,
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Column(Modifier.weight(1f)) {
-                                Text(
-                                    "Codex Build in Embedded PRoot (Disable Linux Sandbox)",
-                                    style = MaterialTheme.typography.titleSmall,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (codexProotBypass) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                Spacer(Modifier.height(2.dp))
-                                Text(
-                                    "Opt-in (OFF by default): Android PRoot blocks Linux bubblewrap/Landlock namespaces needed by Codex workspace-write. Enabling this passes --sandbox danger-full-access ONLY for Codex Build tasks inside PRoot; Plan tasks remain read-only.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = if (codexProotBypass) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            Spacer(Modifier.width(8.dp))
-                            Switch(
-                                checked = codexProotBypass,
-                                enabled = online && api != null && !savingSecurity,
-                                onCheckedChange = { checked ->
-                                    if (api == null) return@Switch
-                                    savingSecurity = true
-                                    scope.launch {
-                                        runCatching { api.updateSettings(checked) }
-                                            .onSuccess { res ->
-                                                codexProotBypass = res.optBoolean("codex_proot_sandbox_bypass", checked)
-                                                notify(Throwable(if (codexProotBypass) "Enabled Codex Build PRoot opt-in (--sandbox danger-full-access)" else "Restored default Codex workspace-write sandbox"))
-                                            }
-                                            .onFailure { notify(it) }
-                                        savingSecurity = false
-                                    }
-                                }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                "Codex Build in Embedded PRoot (Disable Linux Bubblewrap Sandbox)",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = if (codexProotBypass) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                "Opt-in (OFF by default): Passes --sandbox danger-full-access ONLY for Codex Build inside PRoot; Plan remains read-only.",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (codexProotBypass) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
+                        Spacer(Modifier.width(8.dp))
+                        Switch(
+                            checked = codexProotBypass,
+                            enabled = online && api != null && !savingSecurity,
+                            onCheckedChange = { checked ->
+                                if (api == null) return@Switch
+                                savingSecurity = true
+                                scope.launch {
+                                    runCatching { api.updateSettings(checked) }
+                                        .onSuccess { res ->
+                                            codexProotBypass = res.optBoolean("codex_proot_sandbox_bypass", checked)
+                                            notify(Throwable(if (codexProotBypass) "Enabled Codex Build PRoot opt-in" else "Restored default Codex sandbox"))
+                                        }
+                                        .onFailure { notify(it) }
+                                    savingSecurity = false
+                                }
+                            }
+                        )
                     }
                 }
-                listOf(
-                    Pair("Loopback Only", "All bridge communication binds exclusively to 127.0.0.1:8765. Remote network listeners and 0.0.0.0 bindings are strictly rejected."),
-                    Pair("Android KeyStore Encryption", "The device token is encrypted at rest using AES-256 GCM authenticated cryptography in the Android KeyStore hardware module."),
-                    Pair("No Autonomous Git Pushes", "Agents are prevented by system policy from executing git push or deploying code. Commits require manual user initiation via Git Review."),
-                    Pair("Secrets Masking", "Secrets in .env files and API keys are masked using regex redaction before appearing in previews, logs, or prompt contexts.")
-                ).forEach { (title, desc) ->
-                    Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = MaterialTheme.shapes.small, modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                        Column(Modifier.padding(10.dp)) {
-                            Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-                            Spacer(Modifier.height(2.dp))
-                            Text(desc, style = MaterialTheme.typography.bodySmall)
+
+                val policies = listOf(
+                    Pair("Loopback 127.0.0.1 Only", "Bridge binds strictly to 127.0.0.1:8765; 0.0.0.0 and external listeners are rejected."),
+                    Pair("Android KeyStore AES-256", "Tokens, API keys, and GitHub PATs are encrypted at rest in hardware KeyStore."),
+                    Pair("Destructive Action Gate", "Destructive commands (rm -rf, git reset --hard, git push) require explicit user approval."),
+                    Pair("Secrets & .env Masking", "Secrets in .env files and logs are automatically redacted before rendering or prompt injection.")
+                )
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    policies.chunked(2).forEach { rowItems ->
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                            rowItems.forEach { (title, desc) ->
+                                Surface(
+                                    color = MaterialTheme.colorScheme.surfaceVariant,
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Column(Modifier.padding(9.dp)) {
+                                        Text(title, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                                        Spacer(Modifier.height(2.dp))
+                                        Text(desc, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
 
             4 -> {
-                Text("Termux Setup Walkthrough", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                Text(
-                    "1. Install Termux locally on Android.\n" +
-                    "2. Run pkg update && pkg install -y python git nodejs-lts.\n" +
-                    "3. Copy bridge files to ~/tablet-agent/bridge/.\n" +
-                    "4. Run python ~/tablet-agent/bridge/server.py.\n" +
-                    "5. Paste the generated Device Token into the Runtime tab.\n\n" +
-                    "For one-click Start Bridge: In ~/.termux/termux.properties set allow-external-apps=true and grant RUN_COMMAND permission to Tablet Agent.",
-                    style = MaterialTheme.typography.bodySmall
+                val guideItems = listOf(
+                    Pair("1. Zero-Termux Engine", "Bundled PRoot 5.1 + Alpine v3.21 (Node 22, Git 2.47, Python 3.12). Auto-starts on 127.0.0.1:8765."),
+                    Pair("2. Official AI Agents", "Sign in via Settings → Agents & Git (Codex Device OAuth, Antigravity Google OAuth, Claude Code)."),
+                    Pair("3. Private GitHub Clone", "Save a GitHub PAT (ghp_... / github_pat_...) in Agents & Git to clone private repositories."),
+                    Pair("4. Draggable Split & Preview", "Drag the center divider in Split view or use compact Desktop / Tablet / Phone icons.")
                 )
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    guideItems.chunked(2).forEach { rowItems ->
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                            rowItems.forEach { (title, desc) ->
+                                Surface(
+                                    color = MaterialTheme.colorScheme.surfaceVariant,
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                        Text(title, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                                        Text(desc, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }

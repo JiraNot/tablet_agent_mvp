@@ -503,10 +503,25 @@ class LocalCore:
             if u.query or u.fragment:
                 raise BridgeError('Git URL must not contain a query or fragment')
             try:
-                subprocess.run(['git', 'clone', '--', git_url, str(target)], timeout=160, capture_output=True, check=True)
+                clone_cmd = ['git', 'clone']
+                gh_token = os.environ.get('GITHUB_TOKEN', '').strip()
+                clone_env = os.environ.copy()
+                clone_env['GIT_TERMINAL_PROMPT'] = '0'
+                if gh_token:
+                    import base64
+                    basic = base64.b64encode(f'x-access-token:{gh_token}'.encode('utf-8')).decode('ascii')
+                    clone_cmd += ['-c', f'http.https://github.com/.extraheader=AUTHORIZATION: basic {basic}']
+                clone_cmd += ['--', git_url, str(target)]
+                subprocess.run(clone_cmd, timeout=160, capture_output=True, check=True, env=clone_env)
             except (OSError, subprocess.SubprocessError) as e:
                 shutil.rmtree(target, ignore_errors=True)
-                raise BridgeError(f'Clone failed: {str(e)[:300]}', 422)
+                raw_err = ''
+                if isinstance(e, subprocess.CalledProcessError) and e.stderr:
+                    raw_err = e.stderr.decode('utf-8', errors='replace') if isinstance(e.stderr, bytes) else str(e.stderr)
+                else:
+                    raw_err = str(e)
+                clean_err = REDACTION.sub('[REDACTED]', raw_err).strip()
+                raise BridgeError(f'Clone failed: {clean_err[:300]}', 422)
         else:
             target.mkdir(mode=0o700)
             (target / 'README.md').write_text(f'# {name}\n')
@@ -666,7 +681,7 @@ class LocalCore:
         except Exception as e:
             raise BridgeError(f'Git rollback error: {e}')
 
-    def start_task(self, project: str, prompt: str, mode: str = 'build', agent: str = 'codex', model: str = '') -> dict[str, Any]:
+    def start_task(self, project: str, prompt: str, mode: str = 'build', agent: str = 'codex', model: str = '', task_id: str | None = None) -> dict[str, Any]:
         self._project(project)
         if mode not in ALLOWED_MODES:
             raise BridgeError('Mode must be plan or build')
@@ -679,17 +694,33 @@ class LocalCore:
             raise BridgeError(f'Agent "{agent}" does not support build mode')
         if not prompt.strip() or len(prompt) > 24000:
             raise BridgeError('Prompt length must be 1-24000 characters')
-        task_id = str(uuid.uuid4()); now=time.time()
-        # Prevent concurrent agents from editing the same project, including queued jobs.
+        now = time.time()
+        clean_tid = (task_id or '').strip()
+        is_followup = False
         with self.lock:
             with self._db() as db:
-                busy=db.execute("SELECT id FROM tasks WHERE project=? AND status IN ('QUEUED','PLANNING','WAITING_APPROVAL','EXECUTING','VERIFYING','REPAIRING') LIMIT 1", (project,)).fetchone()
+                busy = db.execute("SELECT id FROM tasks WHERE project=? AND status IN ('QUEUED','PLANNING','WAITING_APPROVAL','EXECUTING','VERIFYING','REPAIRING') LIMIT 1", (project,)).fetchone()
                 if busy:
                     raise BridgeError('Another task is active in this project; finish or cancel it first', 409)
-                db.execute('INSERT INTO tasks(id,project,prompt,agent,mode,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)', (task_id,project,prompt,agent,mode,'QUEUED',now,now))
-        self.append(task_id,'status','QUEUED')
-        threading.Thread(target=self._worker, args=(task_id, model), daemon=True, name=f'task-{task_id[:8]}').start()
-        return self.task(task_id)
+                if clean_tid:
+                    existing = db.execute('SELECT * FROM tasks WHERE id=? AND project=?', (clean_tid, project)).fetchone()
+                    if existing:
+                        is_followup = True
+                        db.execute(
+                            'UPDATE tasks SET agent=?, mode=?, status=?, updated_at=?, error=? WHERE id=?',
+                            (agent, mode, 'QUEUED', now, '', clean_tid)
+                        )
+                    else:
+                        clean_tid = str(uuid.uuid4())
+                        db.execute('INSERT INTO tasks(id,project,prompt,agent,mode,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)', (clean_tid,project,prompt,agent,mode,'QUEUED',now,now))
+                else:
+                    clean_tid = str(uuid.uuid4())
+                    db.execute('INSERT INTO tasks(id,project,prompt,agent,mode,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)', (clean_tid,project,prompt,agent,mode,'QUEUED',now,now))
+        if is_followup:
+            self.append(clean_tid, 'user', prompt)
+        self.append(clean_tid, 'status', 'QUEUED')
+        threading.Thread(target=self._worker, args=(clean_tid, model, prompt), daemon=True, name=f'task-{clean_tid[:8]}').start()
+        return self.task(clean_tid)
 
     def _run(self, task_id: str, cmd: list[str], cwd: Path, timeout: float, phase: str) -> tuple[int,str]:
         self.append(task_id,'log',f'Starting {phase}: {cmd[0]} (arguments hidden)')
@@ -942,7 +973,7 @@ class LocalCore:
         with self._db() as db:
             db.execute('INSERT INTO agent_threads(project,agent,session_id,updated_at) VALUES(?,?,?,?) ON CONFLICT(project) DO UPDATE SET session_id=excluded.session_id, updated_at=excluded.updated_at', (project,agent,thread_id,time.time()))
 
-    def _worker(self, task_id: str, model: str = ''):
+    def _worker(self, task_id: str, model: str = '', turn_prompt: str | None = None):
         rec=self.task(task_id); project_path=self._project(rec['project'])
         if self.task(task_id)['status']=='CANCELLED': return
         agent_name = rec['agent']
@@ -966,7 +997,8 @@ class LocalCore:
                 except Exception:
                     pass
         thread = self._thread_for_project(rec['project'], agent_name)
-        prompt_text = f'{policy}{instructions}\n\nUser task:\n{rec["prompt"]}'
+        effective_prompt = turn_prompt if (turn_prompt and turn_prompt.strip()) else rec['prompt']
+        prompt_text = f'{policy}{instructions}\n\nUser task:\n{effective_prompt}'
         if agent_name == 'codex' and mode == 'build' and self.get_settings().get('codex_proot_sandbox_bypass'):
             cmd = adapter.build_cmd(project_path, prompt_text, mode, thread, model, sandbox_override='danger-full-access')
         else:

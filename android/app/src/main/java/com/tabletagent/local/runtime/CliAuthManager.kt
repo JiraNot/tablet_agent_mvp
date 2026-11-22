@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Base64
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -12,11 +13,15 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
 
 data class CliAuthState(
     val signedIn: Boolean = false,
@@ -28,7 +33,17 @@ data class AllCliAuthStatus(
     val codex: CliAuthState = CliAuthState(),
     val agy: CliAuthState = CliAuthState(),
     val claude: CliAuthState = CliAuthState(),
+    val github: CliAuthState = CliAuthState(),
     val loaded: Boolean = false
+)
+
+data class GitHubRepoItem(
+    val name: String,
+    val fullName: String,
+    val cloneUrl: String,
+    val isPrivate: Boolean,
+    val description: String,
+    val updatedAt: String
 )
 
 data class OAuthSessionState(
@@ -57,6 +72,9 @@ object CliAuthManager {
 
     @Volatile
     private var activeProcess: Process? = null
+    @Volatile
+    private var activeJob: Job? = null
+    private const val GITHUB_OAUTH_CLIENT_ID = "178c6fc778ccc68e1d6a"
 
     suspend fun getAuthStatus(context: Context): AllCliAuthStatus = withContext(Dispatchers.IO) {
         if (!BootstrapManager.isReady(context)) return@withContext AllCliAuthStatus()
@@ -68,8 +86,61 @@ object CliAuthManager {
         val codexStatus = checkCodexAuth(context, hasOpenAiKey)
         val claudeStatus = checkClaudeAuth(context, hasAnthropicKey)
         val agyStatus = checkAgyAuth(context, hasGeminiKey)
+        val githubStatus = checkGitHubAuth(context)
 
-        AllCliAuthStatus(codex = codexStatus, agy = agyStatus, claude = claudeStatus, loaded = true)
+        AllCliAuthStatus(
+            codex = codexStatus,
+            agy = agyStatus,
+            claude = claudeStatus,
+            github = githubStatus,
+            loaded = true
+        )
+    }
+
+    private fun checkGitHubAuth(context: Context): CliAuthState {
+        val hasToken = SecureSecrets.hasKey(context, SecureSecrets.KEY_GITHUB)
+        if (!hasToken) return CliAuthState(false, "none", "Not signed in")
+        val ghUser = SecureSecrets.getKey(context, SecureSecrets.KEY_GITHUB_USER)
+        val label = if (ghUser.isNotBlank()) "Signed in as @$ghUser" else "Signed in (${SecureSecrets.maskedHint(context, SecureSecrets.KEY_GITHUB)})"
+        return CliAuthState(true, "oauth", label)
+    }
+
+    suspend fun fetchGitHubUserRepos(context: Context): Result<List<GitHubRepoItem>> = withContext(Dispatchers.IO) {
+        runCatching {
+            val token = SecureSecrets.getKey(context, SecureSecrets.KEY_GITHUB).trim()
+            if (token.isBlank()) throw IllegalStateException("Not signed in to GitHub")
+            val conn = (URL("https://api.github.com/user/repos?sort=updated&per_page=40&affiliation=owner,collaborator,organization_member").openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 10000
+                readTimeout = 10000
+                setRequestProperty("Authorization", "Bearer $token")
+                setRequestProperty("Accept", "application/vnd.github+json")
+                setRequestProperty("User-Agent", "TabletAgentStudio/0.1")
+            }
+            val code = conn.responseCode
+            val raw = (if (code in 200..299) conn.inputStream else conn.errorStream)
+                ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: "[]"
+            conn.disconnect()
+            if (code !in 200..299) {
+                throw IllegalStateException("GitHub API HTTP $code")
+            }
+            val arr = JSONArray(raw)
+            val list = mutableListOf<GitHubRepoItem>()
+            for (i in 0 until arr.length()) {
+                val obj = arr.getJSONObject(i)
+                list.add(
+                    GitHubRepoItem(
+                        name = obj.optString("name"),
+                        fullName = obj.optString("full_name"),
+                        cloneUrl = obj.optString("clone_url"),
+                        isPrivate = obj.optBoolean("private", false),
+                        description = obj.optString("description", "").takeIf { it != "null" } ?: "",
+                        updatedAt = obj.optString("updated_at", "").take(10)
+                    )
+                )
+            }
+            list
+        }
     }
 
     private suspend fun checkCodexAuth(context: Context, hasApiKey: Boolean): CliAuthState {
@@ -162,13 +233,151 @@ object CliAuthManager {
                         File(rootfs, rel).deleteRecursively()
                     }
                 }
+                "GitHub" -> {
+                    SecureSecrets.saveKey(context, SecureSecrets.KEY_GITHUB, "")
+                    SecureSecrets.saveKey(context, SecureSecrets.KEY_GITHUB_USER, "")
+                    if (BootstrapManager.isReady(context)) {
+                        EmbeddedBridgeManager.restart(context)
+                    }
+                }
             }
             "$cliType signed out"
         }
     }
 
+    private fun startGitHubDeviceOAuth(context: Context) {
+        _oauthState.value = OAuthSessionState(
+            cliType = "GitHub",
+            active = true,
+            logs = listOf("Requesting GitHub OAuth device code...")
+        )
+        activeJob = scope.launch {
+            try {
+                val form = "client_id=${URLEncoder.encode(GITHUB_OAUTH_CLIENT_ID, "UTF-8")}&scope=${URLEncoder.encode("repo read:user", "UTF-8")}"
+                val reqConn = (URL("https://github.com/login/device/code").openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    connectTimeout = 10000
+                    readTimeout = 10000
+                    doOutput = true
+                    setRequestProperty("Accept", "application/json")
+                    setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+                    setRequestProperty("User-Agent", "TabletAgentStudio/0.1")
+                }
+                reqConn.outputStream.use { it.write(form.toByteArray(Charsets.UTF_8)) }
+                val rawResp = reqConn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                reqConn.disconnect()
+
+                val json = JSONObject(rawResp)
+                val deviceCode = json.optString("device_code")
+                val userCode = json.optString("user_code")
+                val verifyUri = json.optString("verification_uri", "https://github.com/login/device")
+                var intervalSec = json.optInt("interval", 5).coerceAtLeast(5)
+                val expiresIn = json.optInt("expires_in", 900)
+
+                if (deviceCode.isBlank() || userCode.isBlank()) {
+                    _oauthState.value = _oauthState.value.copy(
+                        active = false,
+                        error = "GitHub did not return a device code: $rawResp"
+                    )
+                    return@launch
+                }
+
+                _oauthState.value = _oauthState.value.copy(
+                    oauthUrl = verifyUri,
+                    deviceCode = userCode,
+                    logs = listOf(
+                        "1. Tap 'Copy Code & Open Browser' below.",
+                        "2. Enter code $userCode on GitHub and authorize.",
+                        "Waiting for GitHub authorization..."
+                    )
+                )
+
+                val deadline = System.currentTimeMillis() + (expiresIn * 1000L)
+                while (isActive && System.currentTimeMillis() < deadline && _oauthState.value.active) {
+                    delay(intervalSec * 1000L)
+                    if (!isActive || !_oauthState.value.active) break
+
+                    val pollForm = "client_id=${URLEncoder.encode(GITHUB_OAUTH_CLIENT_ID, "UTF-8")}" +
+                        "&device_code=${URLEncoder.encode(deviceCode, "UTF-8")}" +
+                        "&grant_type=${URLEncoder.encode("urn:ietf:params:oauth:grant-type:device_code", "UTF-8")}"
+                    val pollConn = (URL("https://github.com/login/oauth/access_token").openConnection() as HttpURLConnection).apply {
+                        requestMethod = "POST"
+                        connectTimeout = 10000
+                        readTimeout = 10000
+                        doOutput = true
+                        setRequestProperty("Accept", "application/json")
+                        setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+                        setRequestProperty("User-Agent", "TabletAgentStudio/0.1")
+                    }
+                    pollConn.outputStream.use { it.write(pollForm.toByteArray(Charsets.UTF_8)) }
+                    val pollRaw = pollConn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                    pollConn.disconnect()
+
+                    val pollJson = JSONObject(pollRaw)
+                    val accessToken = pollJson.optString("access_token")
+                    val err = pollJson.optString("error")
+
+                    if (accessToken.isNotBlank()) {
+                        // Fetch GitHub username for clear UI status
+                        val username = runCatching {
+                            val uConn = (URL("https://api.github.com/user").openConnection() as HttpURLConnection).apply {
+                                requestMethod = "GET"
+                                connectTimeout = 8000
+                                readTimeout = 8000
+                                setRequestProperty("Authorization", "Bearer $accessToken")
+                                setRequestProperty("Accept", "application/vnd.github+json")
+                                setRequestProperty("User-Agent", "TabletAgentStudio/0.1")
+                            }
+                            val uRaw = uConn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                            uConn.disconnect()
+                            JSONObject(uRaw).optString("login")
+                        }.getOrDefault("")
+
+                        SecureSecrets.saveKey(context, SecureSecrets.KEY_GITHUB, accessToken)
+                        if (username.isNotBlank()) {
+                            SecureSecrets.saveKey(context, SecureSecrets.KEY_GITHUB_USER, username)
+                        }
+                        if (BootstrapManager.isReady(context)) {
+                            EmbeddedBridgeManager.restart(context)
+                        }
+                        _oauthState.value = _oauthState.value.copy(
+                            active = false,
+                            completed = true,
+                            logs = _oauthState.value.logs + listOf(
+                                if (username.isNotBlank()) "Signed in to GitHub as @$username!"
+                                else "Signed in to GitHub cleanly!"
+                            )
+                        )
+                        return@launch
+                    } else if (err == "slow_down") {
+                        intervalSec += 5
+                    } else if (err == "authorization_pending") {
+                        // Keep polling
+                    } else if (err.isNotBlank()) {
+                        _oauthState.value = _oauthState.value.copy(
+                            active = false,
+                            error = pollJson.optString("error_description", "GitHub OAuth error: $err")
+                        )
+                        return@launch
+                    }
+                }
+            } catch (e: Exception) {
+                if (_oauthState.value.active) {
+                    _oauthState.value = _oauthState.value.copy(
+                        active = false,
+                        error = e.message ?: "GitHub OAuth failed"
+                    )
+                }
+            }
+        }
+    }
+
     fun startOAuthLogin(context: Context, cliType: String) {
         cancelOAuth()
+        if (cliType == "GitHub") {
+            startGitHubDeviceOAuth(context)
+            return
+        }
         if (!BootstrapManager.isReady(context)) {
             _oauthState.value = OAuthSessionState(cliType = cliType, error = "Embedded runtime is not ready")
             return
@@ -309,6 +518,8 @@ object CliAuthManager {
     }
 
     fun cancelOAuth() {
+        activeJob?.cancel()
+        activeJob = null
         val proc = activeProcess
         activeProcess = null
         if (proc != null) {

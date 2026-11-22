@@ -11,7 +11,7 @@
 | GET | `/v1/projects/{name}/file?path=.env` | raw small file content |
 | PUT | `/v1/projects/{name}/file?path=.env` | `{content}` atomic write |
 | GET | `/v1/tasks?project={name}` | task history |
-| POST | `/v1/tasks` | `{project,prompt,mode:"plan|build",agent?:"codex|claude|opencode",model?:string}` |
+| POST | `/v1/tasks` | `{project,prompt,mode:"plan|build",agent?:"codex|claude|opencode",model?:string,task_id?:string}` (continues existing session when `task_id` is passed) |
 | GET | `/v1/agents` | supported CLI adapters, binary availability & capabilities |
 | GET | `/v1/tasks/{uuid}` | persisted status and verification |
 | GET | `/v1/tasks/{uuid}/events?after=N` | next 120 ordered events + `{has_more, gap_detected, min_seq}` |

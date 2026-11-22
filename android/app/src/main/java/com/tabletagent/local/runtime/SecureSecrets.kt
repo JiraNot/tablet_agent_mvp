@@ -16,7 +16,10 @@ data class ProviderKeySummary(
     val anthropicConfigured: Boolean = false,
     val anthropicHint: String = "",
     val geminiConfigured: Boolean = false,
-    val geminiHint: String = ""
+    val geminiHint: String = "",
+    val githubConfigured: Boolean = false,
+    val githubHint: String = "",
+    val githubUser: String = ""
 )
 
 /**
@@ -28,6 +31,8 @@ object SecureSecrets {
     const val KEY_OPENAI = "OPENAI_API_KEY"
     const val KEY_ANTHROPIC = "ANTHROPIC_API_KEY"
     const val KEY_GEMINI = "GEMINI_API_KEY"
+    const val KEY_GITHUB = "GITHUB_TOKEN"
+    const val KEY_GITHUB_USER = "GITHUB_USER"
 
     private const val ALIAS = "tablet_agent_provider_secrets_key"
     private const val STORE = "tablet_agent_provider_secrets"
@@ -101,13 +106,16 @@ object SecureSecrets {
             anthropicConfigured = hasKey(context, KEY_ANTHROPIC),
             anthropicHint = maskedHint(context, KEY_ANTHROPIC),
             geminiConfigured = hasKey(context, KEY_GEMINI),
-            geminiHint = maskedHint(context, KEY_GEMINI)
+            geminiHint = maskedHint(context, KEY_GEMINI),
+            githubConfigured = hasKey(context, KEY_GITHUB),
+            githubHint = maskedHint(context, KEY_GITHUB),
+            githubUser = getKey(context, KEY_GITHUB_USER)
         )
     }
 
     fun asEnvMap(context: Context): Map<String, String> {
         val out = mutableMapOf<String, String>()
-        for (k in listOf(KEY_OPENAI, KEY_ANTHROPIC, KEY_GEMINI)) {
+        for (k in listOf(KEY_OPENAI, KEY_ANTHROPIC, KEY_GEMINI, KEY_GITHUB)) {
             val v = getKey(context, k)
             if (v.isNotBlank()) out[k] = v
         }
