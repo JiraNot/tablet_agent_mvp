@@ -19,7 +19,8 @@ class QueueAndWorktreeTests(unittest.TestCase):
         self.core = LocalCore(self.root / 'home')
         self.core.create_project('queue_proj')
 
-    def test_task_queue_fifo_execution(self):
+    @patch('bridge.core.LocalCore._worker')
+    def test_task_queue_fifo_execution(self, mock_worker):
         # Fake an in-flight active task
         t1 = self.core.start_task('queue_proj', 'Task 1 in progress', 'plan', agent='codex')
         self.core.set_status(t1['id'], 'PLANNING')

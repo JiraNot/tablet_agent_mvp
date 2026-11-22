@@ -33,7 +33,8 @@ class AionOrchestratorTests(unittest.TestCase):
 
         self.assertFalse(bool(QUOTA_ERROR_RE.search("TypeError: Cannot read property of undefined")))
 
-    def test_cross_agent_handoff_context_synthesized(self):
+    @patch('bridge.core.LocalCore._worker')
+    def test_cross_agent_handoff_context_synthesized(self, mock_worker):
         proj_dir = self.core._project('orch_proj')
         HermesMemoryLedger.record_success(proj_dir, 'Verified: npm run build')
 
