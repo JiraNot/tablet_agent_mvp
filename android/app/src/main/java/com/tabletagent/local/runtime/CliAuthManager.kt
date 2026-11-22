@@ -184,6 +184,7 @@ object CliAuthManager {
             val rootfs = BootstrapManager.getRootfsDir(context)
             val tmpDir = File(rootfs, "tmp").apply { mkdirs() }
             val urlFile = File(tmpDir, "oauth_url.txt").apply { delete() }
+            File(tmpDir, "oauth_code_input.txt").delete()
             val shimScript = "#!/bin/sh\nprintf '%s\\n' \"\$1\" > /tmp/oauth_url.txt.tmp && mv /tmp/oauth_url.txt.tmp /tmp/oauth_url.txt\n"
             val xdgOpen = File(rootfs, "usr/bin/xdg-open").apply {
                 parentFile?.mkdirs()
@@ -199,8 +200,8 @@ object CliAuthManager {
 
             val command = when (cliType) {
                 "Codex" -> "codex login --device-auth"
-                "Claude" -> buildPtyWrapperCommand("claude auth login")
-                "AGY" -> buildPtyWrapperCommand("agy", autoSelectEnterPrompt = "Google OAuth")
+                "Claude" -> writePtyRunnerScript(tmpDir, "claude auth login")
+                "AGY" -> writePtyRunnerScript(tmpDir, "agy", autoSelectEnterPrompt = "Google OAuth", autoDetectAgyAuth = true)
                 else -> {
                     _oauthState.value = _oauthState.value.copy(active = false, error = "Unknown CLI: $cliType")
                     return@launch
@@ -288,16 +289,20 @@ object CliAuthManager {
         }
     }
 
-    fun submitPastedCode(code: String) {
-        val proc = activeProcess ?: return
+    fun submitPastedCode(context: Context, code: String) {
         val trimmed = code.trim()
         if (trimmed.isEmpty()) return
+        _oauthState.value = _oauthState.value.copy(
+            logs = (_oauthState.value.logs + "Submitting verification code...").takeLast(14),
+            error = ""
+        )
         scope.launch {
             runCatching {
-                OutputStreamWriter(proc.outputStream, Charsets.UTF_8).apply {
-                    write(trimmed + "\n")
-                    flush()
-                }
+                val tmpDir = File(BootstrapManager.getRootfsDir(context), "tmp").apply { mkdirs() }
+                val tmpIn = File(tmpDir, "oauth_code_input.txt.tmp")
+                val target = File(tmpDir, "oauth_code_input.txt")
+                tmpIn.writeText(trimmed, Charsets.UTF_8)
+                tmpIn.renameTo(target)
             }
         }
     }
@@ -313,15 +318,34 @@ object CliAuthManager {
     }
 
     /**
-     * Spawns interactive CLI inside a 240-column Linux PTY so prompts/URLs render
-     * without wrapping and Android can feed stdin verification codes cleanly.
+     * Writes a standalone Python PTY runner inside /tmp so fd 0 is never piped,
+     * eliminating EOF spin loops and delivering pasted codes via atomic file drop + CR.
      */
-    private fun buildPtyWrapperCommand(cliCommand: String, autoSelectEnterPrompt: String? = null): String {
+    private fun writePtyRunnerScript(
+        tmpDir: File,
+        cliCommand: String,
+        autoSelectEnterPrompt: String? = null,
+        autoDetectAgyAuth: Boolean = false
+    ): String {
         val promptLiteral = if (autoSelectEnterPrompt != null) {
             Base64.encodeToString(autoSelectEnterPrompt.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
         } else ""
+        val detectFlag = if (autoDetectAgyAuth) "True" else "False"
         val pyScript = """
-import base64, fcntl, os, pty, select, struct, sys, termios, time
+import base64, fcntl, os, pty, select, signal, struct, sys, termios, time
+
+CODE_FILE = '/tmp/oauth_code_input.txt'
+
+def has_agy_creds():
+    for base in ('/root/.antigravity', '/root/.config/antigravity', '/root/.gemini'):
+        if os.path.isdir(base):
+            for dp, _, files in os.walk(base):
+                for fn in files:
+                    low = fn.lower()
+                    if any(k in low for k in ('oauth', 'cred', 'token', 'auth')) and os.path.getsize(os.path.join(dp, fn)) > 10:
+                        return True
+    return False
+
 master, fd = pty.openpty()
 try:
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', 40, 1000, 0, 0))
@@ -340,15 +364,18 @@ if pid == 0:
         os.close(fd)
     os.execvp('/bin/bash', ['/bin/bash', '-c', '$cliCommand'])
 os.close(fd)
+
 prompt_b = base64.b64decode('$promptLiteral') if '$promptLiteral' else b''
+detect_agy = $detectFlag
 sent_enter = False
+submitted_code = False
+had_creds_initially = has_agy_creds() if detect_agy else False
 buf_acc = b''
+exit_override = None
+
 while True:
-    rlist = [master]
-    if not sys.stdin.closed:
-        rlist.append(0)
     try:
-        r, _, _ = select.select(rlist, [], [], 0.25)
+        r, _, _ = select.select([master], [], [], 0.15)
     except Exception:
         break
     if master in r:
@@ -359,26 +386,65 @@ while True:
         if not data:
             break
         os.write(1, data)
-        if prompt_b and not sent_enter:
-            buf_acc = (buf_acc + data)[-4096:]
-            if prompt_b in buf_acc:
-                sent_enter = True
+        buf_acc = (buf_acc + data)[-6144:]
+        if prompt_b and not sent_enter and prompt_b in buf_acc:
+            sent_enter = True
+            time.sleep(0.35)
+            try:
+                os.write(master, b'\r')
+            except OSError:
+                pass
+        if detect_agy and submitted_code:
+            low_buf = buf_acc.lower()
+            if b'got an error:' in low_buf or b'token exchange failed' in low_buf:
                 time.sleep(0.35)
                 try:
-                    os.write(master, b'\r')
+                    os.kill(pid, signal.SIGTERM)
                 except OSError:
                     pass
-    if 0 in r:
+                exit_override = 1
+                break
+            if b'successfully' in low_buf or b'signed in' in low_buf:
+                time.sleep(0.4)
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except OSError:
+                    pass
+                exit_override = 0
+                break
+    if os.path.isfile(CODE_FILE):
         try:
-            inp = os.read(0, 1024)
-            if inp:
-                os.write(master, inp)
+            with open(CODE_FILE, 'r', encoding='utf-8') as f:
+                code_txt = f.read().strip()
+            os.remove(CODE_FILE)
+            if code_txt:
+                os.write(master, code_txt.encode('utf-8'))
+                time.sleep(0.15)
+                os.write(master, b'\r')
+                submitted_code = True
+                buf_acc = b''
+        except Exception:
+            pass
+    if detect_agy and (submitted_code or not had_creds_initially) and sent_enter and has_agy_creds():
+        time.sleep(0.4)
+        try:
+            os.kill(pid, signal.SIGTERM)
         except OSError:
             pass
-_, status = os.waitpid(pid, 0)
-sys.exit(os.waitstatus_to_exitcode(status) if hasattr(os, 'waitstatus_to_exitcode') else (status >> 8))
+        exit_override = 0
+        break
+
+try:
+    _, status = os.waitpid(pid, 0)
+    rc = os.waitstatus_to_exitcode(status) if hasattr(os, 'waitstatus_to_exitcode') else (status >> 8)
+except Exception:
+    rc = 0
+sys.exit(exit_override if exit_override is not None else rc)
 """.trimIndent()
-        val encoded = Base64.encodeToString(pyScript.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
-        return "echo $encoded | base64 -d | python3 -u"
+        val runnerFile = File(tmpDir, "oauth_pty_runner.py").apply {
+            writeText(pyScript, Charsets.UTF_8)
+            setReadable(true, false)
+        }
+        return "exec python3 -u /tmp/${runnerFile.name}"
     }
 }

@@ -497,7 +497,7 @@ fun TabletAgentApp() {
     if (oauthState.cliType.isNotBlank()) {
         CliOAuthDialog(
             state = oauthState,
-            onSubmitCode = { CliAuthManager.submitPastedCode(it) },
+            onSubmitCode = { CliAuthManager.submitPastedCode(context, it) },
             onCancel = { CliAuthManager.cancelOAuth() },
             onDone = {
                 CliAuthManager.cancelOAuth()
