@@ -589,6 +589,8 @@ class LocalCore:
                 os.kill(pid, signal.SIGTERM)
         except OSError:
             return False
+        if os.name == 'nt':
+            return True
         deadline = time.monotonic() + 0.6
         while time.monotonic() < deadline:
             try:

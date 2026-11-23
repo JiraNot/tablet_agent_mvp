@@ -134,6 +134,9 @@ fun parseMarkdownNodes(markdown: String): List<MarkdownNode> {
 }
 
 fun highlightSyntax(code: String, language: String): AnnotatedString {
+    if (code.length > 20000) {
+        return AnnotatedString(code)
+    }
     val lang = language.lowercase()
     val isDark = true
     val keywordColor = Color(0xFFC792EA) // purple

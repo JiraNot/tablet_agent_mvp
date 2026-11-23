@@ -3126,7 +3126,13 @@ private fun StreamingAssistantMessageCard(
                 .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(12.dp))
                 .padding(11.dp)
         ) {
-            if (!isLongText || expandedText || isLatestAndRunning) {
+            if (isLatestAndRunning) {
+                Text(
+                    text = displayText + if ((System.currentTimeMillis() / 400) % 2 == 0L) " ▌" else "",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            } else if (!isLongText || expandedText) {
                 MarkdownAssistantContent(
                     markdown = displayText,
                     onApplyCode = onApplyCode
