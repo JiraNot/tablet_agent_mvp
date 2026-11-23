@@ -62,6 +62,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(201,self.core.import_project(str(obj.get('zip_path','')), str(obj.get('name','')) or None))
         if seg==['v1','agents'] and method=='GET':
             return self.reply(200,{'agents':self.core.available_agents()})
+        if seg==['v1','slm','status'] and method=='GET':
+            return self.reply(200,self.core.slm_status())
+        if seg==['v1','slm','setup'] and method=='POST':
+            return self.reply(200,self.core.slm_setup(self._body()))
         if seg==['v1','settings']:
             if method=='GET':return self.reply(200,self.core.get_settings())
             if method=='PUT':return self.reply(200,self.core.update_settings(self._body()))
@@ -145,6 +149,20 @@ class Handler(BaseHTTPRequestHandler):
                 if seg[4]=='checkpoint' and method=='POST':
                     obj=self._body()
                     return self.reply(200,self.core.git_checkpoint(name,str(obj.get('label','manual'))))
+            if len(seg)>=4 and seg[3]=='worktrees':
+                if len(seg)==4 and method=='GET':
+                    return self.reply(200,{'worktrees':self.core.list_worktrees(name)})
+                if len(seg)==4 and method=='POST':
+                    obj=self._body()
+                    tid=str(obj.get('task_id','manual'))
+                    return self.reply(201,{'path':str(self.core.create_worktree(name,tid))})
+                if len(seg)==4 and method=='DELETE':
+                    obj=self._body()
+                    tid=str(obj.get('task_id','manual'))
+                    self.core.cleanup_worktree(name,tid)
+                    return self.reply(200,{'ok':True})
+                if len(seg)==5 and seg[4]=='prune' and method=='POST':
+                    return self.reply(200,self.core.prune_worktrees(name))
             if len(seg)==5 and seg[3]=='terminal':
                 if seg[4]=='start' and method=='POST':
                     obj=self._body()

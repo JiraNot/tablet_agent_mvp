@@ -32,6 +32,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
@@ -55,6 +56,7 @@ import com.tabletagent.local.ui.ClaudeCodeTopBar
 import com.tabletagent.local.ui.CliOAuthDialog
 import com.tabletagent.local.ui.HermesMemoryDialog
 import com.tabletagent.local.ui.InteractivePtyTerminal
+import com.tabletagent.local.ui.VisualCanvasScreen
 import com.tabletagent.local.ui.OfficialCliCard
 import com.tabletagent.local.ui.PhaseStepperBar
 import com.tabletagent.local.ui.ProviderApiKeysCard
@@ -763,6 +765,20 @@ fun TabletAgentApp() {
                 5 -> InteractivePtyTerminal(
                     project = selectedProject,
                     api = api
+                )
+                6 -> VisualCanvasScreen(
+                    project = selectedProject,
+                    onGenerateCode = { framework, styleNotes, schemaJson ->
+                        val p = "Build a production-ready $framework component matching this visual canvas schema:\n$schemaJson\nStyle Notes: $styleNotes\nEnsure clean responsive layout and verify with tests."
+                        scope.launch {
+                            runCatching {
+                                val res = api.startTask(selectedProject, p, "build", selectedAgent.ifBlank { "codex" }, selectedModel)
+                                selectedTask = res.optString("id")
+                                tab = 0
+                            }.onFailure { notify(it) }
+                        }
+                    },
+                    onClose = { tab = 0 }
                 )
             }
                     }
@@ -1489,130 +1505,377 @@ private fun FilesScreen(
     onEdit: (String) -> Unit,
     onSave: () -> Unit
 ) {
+    var openTabs by rememberSaveable { mutableStateOf(if (selected.isNotBlank()) listOf(selected) else emptyList()) }
+    var activeTab by rememberSaveable { mutableStateOf(selected) }
+    var splitTab by rememberSaveable { mutableStateOf<String?>(null) }
+    var isSplitView by rememberSaveable { mutableStateOf(false) }
+    var showExplorer by rememberSaveable { mutableStateOf(true) }
+    val tabBodies = remember { mutableStateMapOf<String, String>() }
+    val scope = rememberCoroutineScope()
     var maskSecrets by rememberSaveable { mutableStateOf(true) }
-    val isEnv = selected.substringAfterLast('/').startsWith(".env")
     var searchQuery by rememberSaveable { mutableStateOf("") }
     var searchResults by remember { mutableStateOf<List<JSONObject>>(emptyList()) }
-    val searchScope = rememberCoroutineScope()
+
+    // Sync incoming selected file with openTabs
+    LaunchedEffect(selected, body) {
+        if (selected.isNotBlank()) {
+            if (!openTabs.contains(selected)) {
+                openTabs = openTabs + selected
+            }
+            activeTab = selected
+            tabBodies[selected] = body
+        }
+    }
+
+    fun openFileInTab(path: String) {
+        scope.launch {
+            if (!openTabs.contains(path)) {
+                openTabs = openTabs + path
+            }
+            activeTab = path
+            if (!tabBodies.containsKey(path) && api != null && project.isNotBlank()) {
+                runCatching {
+                    val res = api.file(project, path)
+                    tabBodies[path] = res.optString("content", "")
+                }
+            }
+            onFile(path)
+        }
+    }
+
+    fun closeTab(path: String) {
+        val nextTabs = openTabs.filter { it != path }
+        openTabs = nextTabs
+        tabBodies.remove(path)
+        if (activeTab == path) {
+            activeTab = nextTabs.lastOrNull() ?: ""
+            if (activeTab.isNotBlank()) onFile(activeTab)
+        }
+        if (splitTab == path) {
+            splitTab = nextTabs.firstOrNull { it != activeTab }
+        }
+    }
+
+    fun saveTabContent(path: String, content: String) {
+        if (api != null && project.isNotBlank()) {
+            scope.launch {
+                runCatching {
+                    api.saveFile(project, path, content)
+                }
+            }
+        }
+        if (path == selected) onSave()
+    }
 
     Column(Modifier.fillMaxSize()) {
-        Text("Quick file editor", style = MaterialTheme.typography.titleMedium)
-        Text("Project / $dir", style = MaterialTheme.typography.bodySmall)
-
-        if (api != null && project.isNotBlank()) {
+        // Multi-Tab Bar & Split-View Controls
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
+            shape = RoundedCornerShape(8.dp)
+        ) {
             Row(
-                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                OutlinedTextField(
-                    value = searchQuery,
-                    onValueChange = { q ->
-                        searchQuery = q
-                        if (q.isNotBlank()) {
-                            searchScope.launch {
-                                runCatching {
-                                    val res = api.searchFiles(project, q)
-                                    val arr = res.optJSONArray("matches")
-                                    searchResults = if (arr != null) (0 until arr.length()).map { arr.getJSONObject(it) } else emptyList()
+                // Explorer Toggle
+                FilledTonalButton(
+                    onClick = { showExplorer = !showExplorer },
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                    modifier = Modifier.height(30.dp)
+                ) {
+                    Icon(if (showExplorer) Icons.Default.FolderOpen else Icons.Default.Folder, null, Modifier.size(14.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text(if (showExplorer) "Hide Files" else "Files", fontSize = 11.sp)
+                }
+
+                Spacer(Modifier.width(6.dp))
+
+                // Scrollable Open Tabs
+                Row(
+                    modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    openTabs.forEach { tabPath ->
+                        val isCurrent = tabPath == activeTab
+                        val fname = tabPath.substringAfterLast('/')
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = if (isCurrent) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
+                            border = BorderStroke(1.dp, if (isCurrent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant),
+                            modifier = Modifier.clickable {
+                                activeTab = tabPath
+                                onFile(tabPath)
+                            }
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Icon(
+                                    when {
+                                        fname.endsWith(".json") -> Icons.Default.DataObject
+                                        fname.startsWith(".env") -> Icons.Default.VpnKey
+                                        else -> Icons.Default.Description
+                                    },
+                                    null,
+                                    Modifier.size(13.dp),
+                                    tint = if (isCurrent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Text(
+                                    fname,
+                                    fontSize = 11.sp,
+                                    fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (isCurrent) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
+                                )
+                                Box(
+                                    modifier = Modifier.size(16.dp).clickable { closeTab(tabPath) },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(Icons.Default.Close, "Close tab", Modifier.size(11.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
                             }
-                        } else {
-                            searchResults = emptyList()
+                        }
+                    }
+                }
+
+                Spacer(Modifier.width(6.dp))
+
+                // Split View Toggle Button
+                FilledTonalButton(
+                    onClick = {
+                        isSplitView = !isSplitView
+                        if (isSplitView && splitTab == null) {
+                            splitTab = openTabs.firstOrNull { it != activeTab } ?: activeTab
                         }
                     },
-                    placeholder = { Text("Global search in files (Grep)...", fontSize = 12.sp) },
-                    singleLine = true,
-                    leadingIcon = { Icon(Icons.Default.Search, null, Modifier.size(16.dp)) },
-                    trailingIcon = {
-                        if (searchQuery.isNotEmpty()) {
-                            IconButton(onClick = { searchQuery = ""; searchResults = emptyList() }) {
-                                Icon(Icons.Default.Close, null, Modifier.size(14.dp))
-                            }
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    textStyle = MaterialTheme.typography.bodySmall
-                )
-            }
-            if (searchResults.isNotEmpty()) {
-                Surface(
-                    color = MaterialTheme.colorScheme.surfaceVariant,
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.fillMaxWidth().heightIn(max = 160.dp).padding(bottom = 6.dp)
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                    modifier = Modifier.height(30.dp),
+                    colors = ButtonDefaults.filledTonalButtonColors(
+                        containerColor = if (isSplitView) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
+                        contentColor = if (isSplitView) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                    )
                 ) {
-                    LazyColumn(modifier = Modifier.padding(6.dp)) {
-                        items(searchResults) { match ->
-                            val f = match.optString("file")
-                            val line = match.optInt("line", 1)
-                            val snippet = match.optString("snippet")
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { onFile(f) }
-                                    .padding(vertical = 3.dp),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    Icon(Icons.Default.VerticalSplit, null, Modifier.size(14.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text(if (isSplitView) "Split ON" else "Split", fontSize = 11.sp)
+                }
+            }
+        }
+
+        // Main Editor Body
+        Row(Modifier.weight(1f).fillMaxWidth()) {
+            // Collapsible Left File Explorer Drawer
+            if (showExplorer) {
+                Column(Modifier.width(260.dp).fillMaxHeight().padding(end = 8.dp)) {
+                    // Global Search (Grep)
+                    if (api != null && project.isNotBlank()) {
+                        OutlinedTextField(
+                            value = searchQuery,
+                            onValueChange = { q ->
+                                searchQuery = q
+                                if (q.isNotBlank()) {
+                                    scope.launch {
+                                        runCatching {
+                                            val res = api.searchFiles(project, q)
+                                            val arr = res.optJSONArray("matches")
+                                            searchResults = if (arr != null) (0 until arr.length()).map { arr.getJSONObject(it) } else emptyList()
+                                        }
+                                    }
+                                } else {
+                                    searchResults = emptyList()
+                                }
+                            },
+                            placeholder = { Text("Search files...", fontSize = 11.sp) },
+                            singleLine = true,
+                            leadingIcon = { Icon(Icons.Default.Search, null, Modifier.size(14.dp)) },
+                            trailingIcon = {
+                                if (searchQuery.isNotEmpty()) {
+                                    IconButton(onClick = { searchQuery = ""; searchResults = emptyList() }) {
+                                        Icon(Icons.Default.Close, null, Modifier.size(12.dp))
+                                    }
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth().height(46.dp),
+                            textStyle = MaterialTheme.typography.bodySmall
+                        )
+                        if (searchResults.isNotEmpty()) {
+                            Surface(
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                                shape = RoundedCornerShape(6.dp),
+                                modifier = Modifier.fillMaxWidth().heightIn(max = 120.dp).padding(vertical = 4.dp)
                             ) {
-                                Text("$f:$line", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = MaterialTheme.colorScheme.primary)
-                                Text(snippet, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                LazyColumn(modifier = Modifier.padding(4.dp)) {
+                                    items(searchResults) { match ->
+                                        val f = match.optString("file")
+                                        val line = match.optInt("line", 1)
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth().clickable { openFileInTab(f) }.padding(vertical = 2.dp),
+                                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                        ) {
+                                            Text("$f:$line", fontWeight = FontWeight.Bold, fontSize = 10.sp, color = MaterialTheme.colorScheme.primary)
+                                            Text(match.optString("snippet"), fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
-                }
-            }
-        }
 
-        if (dir != ".") TextButton(onClick = { onFolder(dir.substringBeforeLast('/', ".").ifBlank { "." }) }) { Text("← Back") }
-        LazyColumn(Modifier.weight(.4f)) {
-            items(files, key = { it.optString("path") }) { f ->
-                val isDir = f.optBoolean("directory"); val path = f.optString("path")
-                Row(Modifier.fillMaxWidth().clickable { if (isDir) onFolder(path) else onFile(path) }.padding(9.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(if (isDir) Icons.Default.Folder else Icons.Default.Description, null, Modifier.size(18.dp))
-                    Spacer(Modifier.width(9.dp)); Text(f.optString("name"), style = MaterialTheme.typography.bodyMedium)
-                }
-                HorizontalDivider()
-            }
-        }
-        if (selected.isNotBlank()) {
-            Spacer(Modifier.height(8.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(selected, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
-                if (isEnv) {
-                    TextButton(onClick = { maskSecrets = !maskSecrets }) {
-                        Icon(if (maskSecrets) Icons.Default.Visibility else Icons.Default.VisibilityOff, null, Modifier.size(16.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text(if (maskSecrets) "Reveal" else "Mask")
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(top = 4.dp)) {
+                        Text(dir, style = MaterialTheme.typography.labelSmall, modifier = Modifier.weight(1f), maxLines = 1)
+                        if (dir != ".") {
+                            TextButton(
+                                onClick = { onFolder(dir.substringBeforeLast('/', ".").ifBlank { "." }) },
+                                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
+                            ) { Text("← Up", fontSize = 10.sp) }
+                        }
+                    }
+
+                    LazyColumn(Modifier.weight(1f).fillMaxWidth()) {
+                        items(files, key = { it.optString("path") }) { f ->
+                            val isDir = f.optBoolean("directory")
+                            val path = f.optString("path")
+                            Row(
+                                Modifier.fillMaxWidth()
+                                    .clickable { if (isDir) onFolder(path) else openFileInTab(path) }
+                                    .padding(vertical = 6.dp, horizontal = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(if (isDir) Icons.Default.Folder else Icons.Default.Description, null, Modifier.size(15.dp),
+                                    tint = if (isDir) Color(0xFFFBBF24) else MaterialTheme.colorScheme.primary)
+                                Spacer(Modifier.width(6.dp))
+                                Text(f.optString("name"), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+                        }
                     }
                 }
-                Spacer(Modifier.width(4.dp))
-                Button(onClick = onSave) { Text("Save") }
+                VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                Spacer(Modifier.width(8.dp))
             }
-            if (isEnv) {
-                Text(
-                    if (maskSecrets) "Sensitive .env file: secrets are masked for safety" else "Editing raw secrets: never paste keys into public prompts",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.error
-                )
-            }
-            val displayValue = if (isEnv && maskSecrets) {
-                body.lines().joinToString("\n") { line ->
-                    if (line.contains('=') && !line.trimStart().startsWith('#')) {
-                        line.substringBefore('=') + "=••••••••••••"
-                    } else line
-                }
-            } else body
 
-            OutlinedTextField(
-                value = displayValue,
-                onValueChange = {
-                    if (!isEnv || !maskSecrets) onEdit(it)
-                },
-                readOnly = isEnv && maskSecrets,
-                modifier = Modifier.fillMaxWidth().weight(.6f),
-                textStyle = MaterialTheme.typography.bodySmall
-            )
-        } else {
-            Box(Modifier.weight(.6f), contentAlignment = Alignment.Center) { Text("Select a file to edit") }
+            // Code Editors: Single View or Split View
+            if (activeTab.isBlank() && openTabs.isEmpty()) {
+                Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(Icons.Default.Code, null, modifier = Modifier.size(48.dp), tint = MaterialTheme.colorScheme.outlineVariant)
+                        Spacer(Modifier.height(8.dp))
+                        Text("Select a file from the explorer or search to edit", style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+            } else if (!isSplitView) {
+                // Single Full Width Editor Pane
+                val currentContent = tabBodies[activeTab] ?: body
+                val isEnv = activeTab.substringAfterLast('/').startsWith(".env")
+                Column(Modifier.weight(1f).fillMaxHeight()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(activeTab, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            if (isEnv) {
+                                TextButton(onClick = { maskSecrets = !maskSecrets }) {
+                                    Icon(if (maskSecrets) Icons.Default.Visibility else Icons.Default.VisibilityOff, null, Modifier.size(14.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text(if (maskSecrets) "Reveal" else "Mask", fontSize = 11.sp)
+                                }
+                            }
+                            Button(
+                                onClick = { saveTabContent(activeTab, currentContent) },
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                modifier = Modifier.height(30.dp)
+                            ) {
+                                Icon(Icons.Default.Save, null, Modifier.size(13.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("Save", fontSize = 11.sp)
+                            }
+                        }
+                    }
+                    val displayValue = if (isEnv && maskSecrets) {
+                        currentContent.lines().joinToString("\n") { line ->
+                            if (line.contains('=') && !line.trimStart().startsWith('#')) {
+                                line.substringBefore('=') + "=••••••••••••"
+                            } else line
+                        }
+                    } else currentContent
+
+                    OutlinedTextField(
+                        value = displayValue,
+                        onValueChange = { newVal ->
+                            if (!isEnv || !maskSecrets) {
+                                tabBodies[activeTab] = newVal
+                                if (activeTab == selected) onEdit(newVal)
+                            }
+                        },
+                        readOnly = isEnv && maskSecrets,
+                        modifier = Modifier.fillMaxSize(),
+                        textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)
+                    )
+                }
+            } else {
+                // 2-Column Split-View Side-by-Side Editors
+                val pane1Content = tabBodies[activeTab] ?: body
+                val pane2Path = splitTab ?: openTabs.firstOrNull { it != activeTab } ?: activeTab
+                val pane2Content = tabBodies[pane2Path] ?: ""
+
+                Row(Modifier.weight(1f).fillMaxHeight(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    // Pane 1 (Left)
+                    Column(Modifier.weight(1f).fillMaxHeight()) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("Pane 1: ${activeTab.substringAfterLast('/')}", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                            Button(
+                                onClick = { saveTabContent(activeTab, pane1Content) },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                modifier = Modifier.height(28.dp)
+                            ) { Text("Save", fontSize = 10.sp) }
+                        }
+                        OutlinedTextField(
+                            value = pane1Content,
+                            onValueChange = { newVal ->
+                                tabBodies[activeTab] = newVal
+                                if (activeTab == selected) onEdit(newVal)
+                            },
+                            modifier = Modifier.fillMaxSize(),
+                            textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+                        )
+                    }
+
+                    VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                    // Pane 2 (Right)
+                    Column(Modifier.weight(1f).fillMaxHeight()) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("Pane 2: ${pane2Path.substringAfterLast('/')}", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = Color(0xFF38BDF8))
+                            Button(
+                                onClick = { saveTabContent(pane2Path, pane2Content) },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                modifier = Modifier.height(28.dp)
+                            ) { Text("Save", fontSize = 10.sp) }
+                        }
+                        OutlinedTextField(
+                            value = pane2Content,
+                            onValueChange = { newVal ->
+                                tabBodies[pane2Path] = newVal
+                            },
+                            modifier = Modifier.fillMaxSize(),
+                            textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+                        )
+                    }
+                }
+            }
         }
     }
 }

@@ -726,7 +726,8 @@ fun ClaudeCodeTopBar(
                                 Triple(1, "Split (Chat + Preview)", Icons.Default.VerticalSplit),
                                 Triple(2, "Full Preview", Icons.Default.Visibility),
                                 Triple(3, "Quick Files", Icons.Default.FolderOpen),
-                                Triple(5, "Linux PTY Terminal", Icons.Default.Terminal)
+                                Triple(5, "Linux PTY Terminal", Icons.Default.Terminal),
+                                Triple(6, "Visual UI Canvas", Icons.Default.DashboardCustomize)
                             ).forEach { (idx, label, icon) ->
                                 DropdownMenuItem(
                                     leadingIcon = { Icon(icon, null, Modifier.size(16.dp)) },
@@ -777,6 +778,26 @@ fun ClaudeCodeTopBar(
                             contentDescription = "Terminal",
                             modifier = Modifier.size(14.dp),
                             tint = if (workspaceView == 5) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    // Compact Icon Button for Visual UI Canvas
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .size(28.dp)
+                            .clip(RoundedCornerShape(7.dp))
+                            .background(
+                                if (workspaceView == 6) MaterialTheme.colorScheme.primaryContainer
+                                else MaterialTheme.colorScheme.surfaceVariant
+                            )
+                            .clickable { onSelectWorkspaceView(if (workspaceView == 6) 0 else 6) }
+                    ) {
+                        Icon(
+                            Icons.Default.DashboardCustomize,
+                            contentDescription = "Visual Canvas",
+                            modifier = Modifier.size(14.dp),
+                            tint = if (workspaceView == 6) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
 
@@ -1139,7 +1160,8 @@ fun AionClaudeAgentPane(
     } else listOf(
         Triple("codex", "Codex CLI", true),
         Triple("claude", "Claude Code", true),
-        Triple("antigravity", "Antigravity CLI (agy)", true)
+        Triple("antigravity", "Antigravity CLI (agy)", true),
+        Triple("slm", "Local SLM (Offline)", true)
     )
 
     val visibleAgents = rawAgents.filter { (name, _, avail) ->
@@ -1147,6 +1169,7 @@ fun AionClaudeAgentPane(
             "codex" -> cliAuthStatus.codex.signedIn
             "claude" -> cliAuthStatus.claude.signedIn
             "antigravity" -> cliAuthStatus.agy.signedIn
+            "slm" -> true
             else -> false
         }
         avail && (!isEmbeddedRuntime || (cliAuthStatus.loaded && signedIn))
@@ -2044,6 +2067,7 @@ fun AionClaudeAgentPane(
                                                 "codex" -> "Codex"
                                                 "claude" -> "Claude"
                                                 "antigravity" -> "Antigravity"
+                                                "slm" -> "Local SLM"
                                                 else -> selectedAgent
                                             },
                                             style = MaterialTheme.typography.labelSmall,
@@ -2705,6 +2729,7 @@ fun AionClaudeAgentPane(
                                         "codex" -> "Codex"
                                         "claude" -> "Claude"
                                         "antigravity" -> "Antigravity"
+                                        "slm" -> "Local SLM"
                                         else -> selectedAgent
                                     },
                                     style = MaterialTheme.typography.labelSmall,

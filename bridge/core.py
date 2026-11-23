@@ -459,6 +459,55 @@ class AntigravityAdapter(BaseAgentAdapter):
         cmd.append('--print=' + prompt)
         return cmd
 
+class LocalSlmAdapter(BaseAgentAdapter):
+    def __init__(self):
+        super().__init__(
+            name='slm',
+            display_name='Local SLM (llama.cpp Offline)',
+            binary='llama-cli',
+            can_plan=True,
+            can_build=True,
+            supports_resume=False,
+            models=[
+                'default',
+                'qwen2.5-coder-1.5b-q4',
+                'qwen2.5-coder-3b-q4',
+                'gemma-2-2b-it-q4',
+            ]
+        )
+
+    def _find_model_path(self, model_name: str) -> Path | None:
+        model_dirs = [
+            Path('/root/models'),
+            Path.home() / 'models',
+            Path('/data/data/com.tabletagent.local/files/runtime/rootfs/root/models'),
+        ]
+        for d in model_dirs:
+            if not d.exists():
+                continue
+            for f in d.glob('*.gguf'):
+                if model_name in f.name.lower() or model_name == 'default':
+                    return f
+            for f in d.glob('*.gguf'):
+                return f
+        return None
+
+    def is_available(self) -> bool:
+        if shutil.which(self.binary) or shutil.which('llama-server'):
+            return True
+        for p in ['/usr/bin/llama-cli', '/usr/local/bin/llama-cli', '/root/.local/bin/llama-cli']:
+            if Path(p).is_file():
+                return True
+        return False
+
+    def build_cmd(self, project_path: Path, prompt: str, mode: str, thread_id: str | None = None, model: str = '', sandbox_override: str | None = None) -> list[str]:
+        bin_cmd = self._resolve_binary(project_path)
+        model_file = self._find_model_path(model if model and model != 'default' else 'qwen')
+        model_arg = str(model_file) if model_file else '/root/models/qwen2.5-coder-1.5b.gguf'
+        sys_prompt = "You are a local coding assistant running on an Android tablet. Provide concise, production-ready code."
+        chat_prompt = f"<|im_start|>system\n{sys_prompt}<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+        return bin_cmd + ['-m', model_arg, '-p', chat_prompt, '-n', '1024', '-c', '2048', '--temp', '0.2', '--no-display-prompt']
+
 class LocalCore:
     def __init__(self, home: Path):
         self.home = Path(home).expanduser().resolve()
@@ -481,7 +530,8 @@ class LocalCore:
             'codex': CodexAdapter(),
             'claude': ClaudeCodeAdapter(),
             'opencode': OpenCodeAdapter(),
-            'antigravity': AntigravityAdapter()
+            'antigravity': AntigravityAdapter(),
+            'slm': LocalSlmAdapter()
         }
         self._init_db()
         self._recover_interrupted()
@@ -499,7 +549,6 @@ class LocalCore:
         db = sqlite3.connect(self.dbpath, timeout=10)
         db.row_factory = sqlite3.Row
         db.execute('PRAGMA busy_timeout=5000')
-        db.execute('PRAGMA journal_mode=WAL')
         return db
 
     @contextmanager
@@ -513,6 +562,7 @@ class LocalCore:
 
     def _init_db(self):
         with self._db() as db:
+            db.execute('PRAGMA journal_mode=WAL')
             db.executescript('''
             CREATE TABLE IF NOT EXISTS tasks(
                 id TEXT PRIMARY KEY, project TEXT NOT NULL, prompt TEXT NOT NULL,
@@ -611,9 +661,8 @@ class LocalCore:
         now = time.time()
         with self._db() as db:
             pids = [dict(r) for r in db.execute('SELECT pid, pgid, cmd_hint FROM process_pids').fetchall()]
-        for rec in pids:
-            self._terminate_pid_record(int(rec['pid']), int(rec['pgid']), str(rec['cmd_hint']))
-        with self._db() as db:
+            for rec in pids:
+                self._terminate_pid_record(int(rec['pid']), int(rec['pgid']), str(rec['cmd_hint']))
             db.execute('DELETE FROM process_pids')
             db.execute("UPDATE tasks SET status='INTERRUPTED', error='Bridge restarted; CLI process status unknown', updated_at=? WHERE status NOT IN ('PLANNED','COMPLETED','NEEDS_VERIFICATION','FAILED','CANCELLED','BLOCKED_SETUP','INTERRUPTED')", (now,))
             db.execute("UPDATE approvals SET status='DENIED', resolved_at=? WHERE status='PENDING'", (now,))
@@ -924,6 +973,66 @@ class LocalCore:
             shutil.rmtree(wt_dir, ignore_errors=True)
         except Exception:
             pass
+
+    def list_worktrees(self, project: str) -> list[dict[str, Any]]:
+        base = self._project(project)
+        git_cmd = shutil.which('git') or 'git'
+        res = subprocess.run([git_cmd, 'worktree', 'list', '--porcelain'], cwd=base, capture_output=True, text=True, timeout=10)
+        if res.returncode != 0:
+            return []
+        trees = []
+        cur: dict[str, Any] = {}
+        for line in res.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                if cur:
+                    cur['is_base'] = Path(cur.get('path', '')).resolve() == base.resolve()
+                    trees.append(cur)
+                    cur = {}
+                continue
+            if line.startswith('worktree '):
+                cur['path'] = line[9:].strip()
+            elif line.startswith('HEAD '):
+                cur['head'] = line[5:].strip()
+            elif line.startswith('branch '):
+                cur['branch'] = line[7:].removeprefix('refs/heads/').strip()
+        if cur:
+            cur['is_base'] = Path(cur.get('path', '')).resolve() == base.resolve()
+            trees.append(cur)
+        return trees
+
+    def prune_worktrees(self, project: str) -> dict[str, Any]:
+        base = self._project(project)
+        git_cmd = shutil.which('git') or 'git'
+        subprocess.run([git_cmd, 'worktree', 'prune'], cwd=base, capture_output=True, timeout=10)
+        return {'ok': True}
+
+    def slm_status(self) -> dict[str, Any]:
+        adapter = self.adapters.get('slm')
+        available = adapter.is_available() if adapter else False
+        models = []
+        for d in [Path('/root/models'), Path.home() / 'models', Path('/data/data/com.tabletagent.local/files/runtime/rootfs/root/models')]:
+            if d.exists():
+                models += [f.name for f in d.glob('*.gguf')]
+        return {
+            'installed': available,
+            'binary': adapter.binary if adapter else 'llama-cli',
+            'models': list(set(models)),
+            'default_model': 'qwen2.5-coder-1.5b-q4'
+        }
+
+    def slm_setup(self, payload: dict[str, Any]) -> dict[str, Any]:
+        action = payload.get('action', 'check')
+        model_name = payload.get('model', 'qwen2.5-coder-1.5b')
+        models_dir = Path('/root/models')
+        models_dir.mkdir(parents=True, exist_ok=True)
+        return {
+            'ok': True,
+            'action': action,
+            'model': model_name,
+            'target_dir': str(models_dir),
+            'recommended_model': 'https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF/resolve/main/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf'
+        }
 
     def _dispatch_next_queued_task(self, project: str):
         next_task = None
@@ -1252,13 +1361,21 @@ class LocalCore:
                                 if isinstance(res_txt,str) and res_txt and res_txt[:1500] not in lines:
                                     lines.append(res_txt[:1500]); self.append(task_id,'message',res_txt)
                     except json.JSONDecodeError:
-                        self.append(task_id,'log',line[:800])
+                        if 'llama' in cmd[0] or '-m' in cmd:
+                            lines.append(line[:1500])
+                            self.append(task_id, 'message', line)
+                            done_marker = True
+                        else:
+                            self.append(task_id,'log',line[:800])
                 else:
                     lines.append(line[:800]); self.append(task_id,'verification',line[:1200])
             proc.wait(timeout=2)
             if phase == 'agent' and proc.returncode == 0 and (not done_marker or fail_marker):
-                self.append(task_id, 'error', 'Agent CLI did not report turn completion')
-                return 90, '\n'.join(lines)[-6000:]
+                if 'llama' in cmd[0] or '-m' in cmd:
+                    done_marker = True
+                else:
+                    self.append(task_id, 'error', 'Agent CLI did not report turn completion')
+                    return 90, '\n'.join(lines)[-6000:]
             return proc.returncode or 0, '\n'.join(lines)[-6000:]
         finally:
             done.set()

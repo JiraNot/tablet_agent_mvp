@@ -117,4 +117,18 @@ class LocalApi(private val deviceToken: String, port: Int = 8765) {
         request("POST", "/v1/projects/${encode(project)}/terminal/resize", JSONObject().put("cols", cols).put("rows", rows))
     suspend fun terminalStop(project: String): JSONObject =
         request("POST", "/v1/projects/${encode(project)}/terminal/stop", JSONObject())
+
+    // Worktrees & Offline Local SLM
+    suspend fun listWorktrees(project: String): JSONArray =
+        request("GET", "/v1/projects/${encode(project)}/worktrees").optJSONArray("worktrees") ?: JSONArray()
+    suspend fun createWorktree(project: String, taskId: String): JSONObject =
+        request("POST", "/v1/projects/${encode(project)}/worktrees", JSONObject().put("task_id", taskId))
+    suspend fun deleteWorktree(project: String, taskId: String): JSONObject =
+        request("DELETE", "/v1/projects/${encode(project)}/worktrees", JSONObject().put("task_id", taskId))
+    suspend fun pruneWorktrees(project: String): JSONObject =
+        request("POST", "/v1/projects/${encode(project)}/worktrees/prune", JSONObject())
+
+    suspend fun slmStatus(): JSONObject = request("GET", "/v1/slm/status")
+    suspend fun slmSetup(action: String = "check", model: String = "qwen2.5-coder-1.5b"): JSONObject =
+        request("POST", "/v1/slm/setup", JSONObject().put("action", action).put("model", model))
 }

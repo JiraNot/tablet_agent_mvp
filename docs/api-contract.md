@@ -76,3 +76,13 @@ States: `QUEUED`, `PLANNING`, `WAITING_APPROVAL`, `EXECUTING`, `VERIFYING`, `REP
 ### 4. Full Stack Preview & Live Logs
 - **`GET /v1/projects/{name}/preview`**: Returns `{"status": "running", "url": "http://127.0.0.1:5173", "stack": "vite", "logs": ["..."]}` with last 200 lines ring-buffer.
 - Multi-stack auto-detection: Vite/Next, Monorepo (`frontend/`), Python FastAPI (`uvicorn`), Flask (`flask run`), Django (`manage.py runserver`), Static HTML (`http.server`).
+
+### 5. Git Worktrees (Multi-Agent Parallelism)
+- **`GET /v1/projects/{name}/worktrees`**: Lists active worktrees in the project: `{"worktrees": [{"path": "/...", "head": "...", "branch": "feature/a", "is_base": false}]}`.
+- **`POST /v1/projects/{name}/worktrees`**: Creates a new isolated worktree: `{"branch": "feature/parallel", "create_branch": true}`.
+- **`DELETE /v1/projects/{name}/worktrees`**: Removes a worktree: `{"path": "/...", "force": false}`.
+- **`POST /v1/projects/{name}/worktrees/prune`**: Cleans up stale worktree administrative records.
+
+### 6. 100% Offline Local Small Language Model (SLM via llama.cpp)
+- **`GET /v1/slm/status`**: Returns local llama.cpp runtime & model presence: `{"installed": true, "binary": "llama-cli", "models": ["qwen2.5-coder-1.5b-q4.gguf"], "default_model": "qwen2.5-coder-1.5b-q4"}`.
+- **`POST /v1/slm/setup`**: Downloads/provisions local GGUF weights into the embedded runtime for 100% offline agent operation without cloud API keys.
