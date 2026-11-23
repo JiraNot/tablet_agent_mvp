@@ -186,6 +186,16 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(rb['success'])
         self.assertTrue(self.core.git_status('demo')['clean'])
         self.assertEqual(self.core.read_file('demo','index.js')['content'],'console.log("v1");\n')
+    def test_git_commit_uses_github_identity(self):
+        with patch.dict('os.environ', {'GITHUB_USER': 'testdeveloper', 'GITHUB_EMAIL': 'testdeveloper@users.noreply.github.com'}):
+            self.core.write_file('demo', 'feature.txt', 'new feature\n')
+            res = self.core.git_commit('demo', 'feat: new feature via github account')
+            self.assertTrue(res['committed'])
+            log = self.core.git_log('demo', limit=1)
+            self.assertTrue(log['is_git'])
+            self.assertEqual(len(log['commits']), 1)
+            self.assertEqual(log['commits'][0]['author'], 'testdeveloper')
+            self.assertEqual(log['commits'][0]['message'], 'feat: new feature via github account')
     def test_disk_full_atomic_write_leaves_original_intact(self):
         self.core.write_file('demo','safe.txt','original-content')
         with patch('os.fsync', side_effect=OSError(28, 'No space left on device')):
@@ -220,5 +230,12 @@ class CoreTests(unittest.TestCase):
         too_big = base64.b64encode(b'A' * (25 * 1024 * 1024 + 1)).decode('ascii')
         with self.assertRaises(BridgeError):
             self.core.save_attachment('demo', 'huge.bin', too_big)
+
+    def test_git_create_and_push_requires_auth(self):
+        from core import BridgeError
+        with patch.dict('os.environ', {}, clear=True):
+            with self.assertRaises(BridgeError) as ctx:
+                self.core.git_create_and_push('demo', 'my-repo')
+            self.assertIn('GitHub authentication required', str(ctx.exception))
 
 if __name__=='__main__':unittest.main()

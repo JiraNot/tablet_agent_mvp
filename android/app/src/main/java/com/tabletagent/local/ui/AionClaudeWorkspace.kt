@@ -782,26 +782,6 @@ fun ClaudeCodeTopBar(
                         )
                     }
 
-                    // Compact Icon Button for Visual UI Canvas
-                    Box(
-                        contentAlignment = Alignment.Center,
-                        modifier = Modifier
-                            .size(28.dp)
-                            .clip(RoundedCornerShape(7.dp))
-                            .background(
-                                if (workspaceView == 6) MaterialTheme.colorScheme.primaryContainer
-                                else MaterialTheme.colorScheme.surfaceVariant
-                            )
-                            .clickable { onSelectWorkspaceView(if (workspaceView == 6) 0 else 6) }
-                    ) {
-                        Icon(
-                            Icons.Default.DashboardCustomize,
-                            contentDescription = "Visual Canvas",
-                            modifier = Modifier.size(14.dp),
-                            tint = if (workspaceView == 6) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-
                     // Compact Icon Button for Git Review & Commit
                     if (selectedProject.isNotBlank()) {
                         Box(

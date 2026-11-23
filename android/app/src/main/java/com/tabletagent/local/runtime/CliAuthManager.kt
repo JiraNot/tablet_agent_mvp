@@ -101,7 +101,12 @@ object CliAuthManager {
         val hasToken = SecureSecrets.hasKey(context, SecureSecrets.KEY_GITHUB)
         if (!hasToken) return CliAuthState(false, "none", "Not signed in")
         val ghUser = SecureSecrets.getKey(context, SecureSecrets.KEY_GITHUB_USER)
-        val label = if (ghUser.isNotBlank()) "Signed in as @$ghUser" else "Signed in (${SecureSecrets.maskedHint(context, SecureSecrets.KEY_GITHUB)})"
+        val ghEmail = SecureSecrets.getKey(context, SecureSecrets.KEY_GITHUB_EMAIL)
+        val label = when {
+            ghUser.isNotBlank() && ghEmail.isNotBlank() -> "Signed in as @$ghUser ($ghEmail)"
+            ghUser.isNotBlank() -> "Signed in as @$ghUser"
+            else -> "Signed in (${SecureSecrets.maskedHint(context, SecureSecrets.KEY_GITHUB)})"
+        }
         return CliAuthState(true, "oauth", label)
     }
 
@@ -236,6 +241,14 @@ object CliAuthManager {
                 "GitHub" -> {
                     SecureSecrets.saveKey(context, SecureSecrets.KEY_GITHUB, "")
                     SecureSecrets.saveKey(context, SecureSecrets.KEY_GITHUB_USER, "")
+                    SecureSecrets.saveKey(context, SecureSecrets.KEY_GITHUB_EMAIL, "")
+                    val rootfs = BootstrapManager.getRootfsDir(context)
+                    if (rootfs.isDirectory) {
+                        runCatching {
+                            File(rootfs, "root/.git-credentials").delete()
+                            EmbeddedProcessRunner.execute(context, "git config --global --unset credential.helper 2>&1")
+                        }
+                    }
                     if (BootstrapManager.isReady(context)) {
                         EmbeddedBridgeManager.restart(context)
                     }
@@ -253,7 +266,7 @@ object CliAuthManager {
         )
         activeJob = scope.launch {
             try {
-                val form = "client_id=${URLEncoder.encode(GITHUB_OAUTH_CLIENT_ID, "UTF-8")}&scope=${URLEncoder.encode("repo read:user", "UTF-8")}"
+                val form = "client_id=${URLEncoder.encode(GITHUB_OAUTH_CLIENT_ID, "UTF-8")}&scope=${URLEncoder.encode("repo read:user user:email", "UTF-8")}"
                 val reqConn = (URL("https://github.com/login/device/code").openConnection() as HttpURLConnection).apply {
                     requestMethod = "POST"
                     connectTimeout = 10000
@@ -264,7 +277,9 @@ object CliAuthManager {
                     setRequestProperty("User-Agent", "TabletAgentStudio/0.1")
                 }
                 reqConn.outputStream.use { it.write(form.toByteArray(Charsets.UTF_8)) }
-                val rawResp = reqConn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                val reqCode = reqConn.responseCode
+                val rawResp = (if (reqCode in 200..299) reqConn.inputStream else reqConn.errorStream)
+                    ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: "{}"
                 reqConn.disconnect()
 
                 val json = JSONObject(rawResp)
@@ -287,7 +302,7 @@ object CliAuthManager {
                     deviceCode = userCode,
                     logs = listOf(
                         "1. Tap 'Copy Code & Open Browser' below.",
-                        "2. Enter code $userCode on GitHub and authorize.",
+                        "2. Enter code $userCode on GitHub and tap Authorize.",
                         "Waiting for GitHub authorization..."
                     )
                 )
@@ -310,7 +325,9 @@ object CliAuthManager {
                         setRequestProperty("User-Agent", "TabletAgentStudio/0.1")
                     }
                     pollConn.outputStream.use { it.write(pollForm.toByteArray(Charsets.UTF_8)) }
-                    val pollRaw = pollConn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                    val pollCode = pollConn.responseCode
+                    val pollRaw = (if (pollCode in 200..299) pollConn.inputStream else pollConn.errorStream)
+                        ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: "{}"
                     pollConn.disconnect()
 
                     val pollJson = JSONObject(pollRaw)
@@ -318,8 +335,12 @@ object CliAuthManager {
                     val err = pollJson.optString("error")
 
                     if (accessToken.isNotBlank()) {
-                        // Fetch GitHub username for clear UI status
-                        val username = runCatching {
+                        // Fetch GitHub user profile and verified email
+                        var username = ""
+                        var authorName = ""
+                        var email = ""
+
+                        runCatching {
                             val uConn = (URL("https://api.github.com/user").openConnection() as HttpURLConnection).apply {
                                 requestMethod = "GET"
                                 connectTimeout = 8000
@@ -328,24 +349,81 @@ object CliAuthManager {
                                 setRequestProperty("Accept", "application/vnd.github+json")
                                 setRequestProperty("User-Agent", "TabletAgentStudio/0.1")
                             }
-                            val uRaw = uConn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                            val uCode = uConn.responseCode
+                            val uRaw = (if (uCode in 200..299) uConn.inputStream else uConn.errorStream)
+                                ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: "{}"
                             uConn.disconnect()
-                            JSONObject(uRaw).optString("login")
-                        }.getOrDefault("")
+                            val uObj = JSONObject(uRaw)
+                            username = uObj.optString("login", "")
+                            authorName = uObj.optString("name", username)
+                            email = uObj.optString("email", "")
+                        }
+
+                        if (email.isBlank() || email == "null") {
+                            runCatching {
+                                val eConn = (URL("https://api.github.com/user/emails").openConnection() as HttpURLConnection).apply {
+                                    requestMethod = "GET"
+                                    connectTimeout = 8000
+                                    readTimeout = 8000
+                                    setRequestProperty("Authorization", "Bearer $accessToken")
+                                    setRequestProperty("Accept", "application/vnd.github+json")
+                                    setRequestProperty("User-Agent", "TabletAgentStudio/0.1")
+                                }
+                                val eCode = eConn.responseCode
+                                val eRaw = (if (eCode in 200..299) eConn.inputStream else eConn.errorStream)
+                                    ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: "[]"
+                                eConn.disconnect()
+                                val emailsArr = JSONArray(eRaw)
+                                for (i in 0 until emailsArr.length()) {
+                                    val item = emailsArr.getJSONObject(i)
+                                    if (item.optBoolean("primary", false)) {
+                                        email = item.optString("email")
+                                        break
+                                    }
+                                }
+                                if (email.isBlank() && emailsArr.length() > 0) {
+                                    email = emailsArr.getJSONObject(0).optString("email")
+                                }
+                            }
+                        }
+
+                        if (email.isBlank() || email == "null") {
+                            email = if (username.isNotBlank()) "$username@users.noreply.github.com" else "agent@tablet.local"
+                        }
+                        if (authorName.isBlank() || authorName == "null") {
+                            authorName = username.ifBlank { "Tablet Developer" }
+                        }
 
                         SecureSecrets.saveKey(context, SecureSecrets.KEY_GITHUB, accessToken)
                         if (username.isNotBlank()) {
                             SecureSecrets.saveKey(context, SecureSecrets.KEY_GITHUB_USER, username)
                         }
+                        SecureSecrets.saveKey(context, SecureSecrets.KEY_GITHUB_EMAIL, email)
+
+                        // Configure PRoot global git credentials and commit author
+                        val rootfs = BootstrapManager.getRootfsDir(context)
+                        if (rootfs.isDirectory) {
+                            runCatching {
+                                val gitCreds = File(rootfs, "root/.git-credentials")
+                                gitCreds.parentFile?.mkdirs()
+                                gitCreds.writeText("https://${username}:${accessToken}@github.com\n", Charsets.UTF_8)
+                                EmbeddedProcessRunner.execute(context, "git config --global credential.helper store 2>&1")
+                                EmbeddedProcessRunner.execute(context, "git config --global user.name \"$authorName\" 2>&1")
+                                EmbeddedProcessRunner.execute(context, "git config --global user.email \"$email\" 2>&1")
+                            }
+                        }
+
                         if (BootstrapManager.isReady(context)) {
                             EmbeddedBridgeManager.restart(context)
                         }
+
                         _oauthState.value = _oauthState.value.copy(
                             active = false,
                             completed = true,
                             logs = _oauthState.value.logs + listOf(
-                                if (username.isNotBlank()) "Signed in to GitHub as @$username!"
-                                else "Signed in to GitHub cleanly!"
+                                "✓ Signed in to GitHub as @$username ($email)!",
+                                "✓ Git credentials and commit author configured in PRoot.",
+                                "✓ Remote Push, Pull, and Clone operations unlocked!"
                             )
                         )
                         return@launch

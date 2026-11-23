@@ -54,9 +54,9 @@ import com.tabletagent.local.ui.AionClaudeAgentPane
 import com.tabletagent.local.ui.AionClaudeSidebar
 import com.tabletagent.local.ui.ClaudeCodeTopBar
 import com.tabletagent.local.ui.CliOAuthDialog
+import com.tabletagent.local.ui.GitHubUnifiedAccountCard
 import com.tabletagent.local.ui.HermesMemoryDialog
 import com.tabletagent.local.ui.InteractivePtyTerminal
-import com.tabletagent.local.ui.VisualCanvasScreen
 import com.tabletagent.local.ui.OfficialCliCard
 import com.tabletagent.local.ui.PhaseStepperBar
 import com.tabletagent.local.ui.ProviderApiKeysCard
@@ -746,6 +746,7 @@ fun TabletAgentApp() {
                                 .onSuccess { error = it }
                                 .onFailure { notify(it) }
                             cliAuthStatus = CliAuthManager.getAuthStatus(context)
+                            keySummary = SecureSecrets.getSummary(context)
                             authBusy = false
                         }
                     },
@@ -759,6 +760,7 @@ fun TabletAgentApp() {
                                 }
                                 .onFailure { notify(it) }
                             cliAuthStatus = CliAuthManager.getAuthStatus(context)
+                            keySummary = SecureSecrets.getSummary(context)
                             authBusy = false
                         }
                     },
@@ -767,20 +769,6 @@ fun TabletAgentApp() {
                 5 -> InteractivePtyTerminal(
                     project = selectedProject,
                     api = api
-                )
-                6 -> VisualCanvasScreen(
-                    project = selectedProject,
-                    onGenerateCode = { framework, styleNotes, schemaJson ->
-                        val p = "Build a production-ready $framework component matching this visual canvas schema:\n$schemaJson\nStyle Notes: $styleNotes\nEnsure clean responsive layout and verify with tests."
-                        scope.launch {
-                            runCatching {
-                                val res = api.startTask(selectedProject, p, "build", selectedAgent.ifBlank { "codex" }, selectedModel)
-                                selectedTask = res.optString("id")
-                                tab = 0
-                            }.onFailure { notify(it) }
-                        }
-                    },
-                    onClose = { tab = 0 }
                 )
             }
                     }
@@ -2106,16 +2094,13 @@ private fun SettingsScreen(
                         onInstallOrUpdate = { onInstallCli("Claude") }
                     )
 
-                    OfficialCliCard(
-                        title = "GitHub Account (Git Clone)",
-                        subtitle = "GitHub OAuth Device Login for cloning private repositories (${cliVersions?.git ?: "git 2.47.3"})",
+                    GitHubUnifiedAccountCard(
                         authState = cliAuthStatus.github,
-                        isInstalled = true,
-                        isInstalling = false,
-                        anyInstalling = installingCli != null || authBusy,
+                        summary = keySummary,
+                        gitVersion = cliVersions?.git ?: "git 2.47.3",
+                        busy = installingCli != null || authBusy,
                         onSignIn = { onSignInCli("GitHub") },
-                        onSignOut = { onSignOutCli("GitHub") },
-                        onInstallOrUpdate = null
+                        onSignOut = { onSignOutCli("GitHub") }
                     )
 
                     ProviderApiKeysCard(
@@ -2333,6 +2318,12 @@ fun GitReviewDialog(
     var worktrees by remember { mutableStateOf<List<JSONObject>>(emptyList()) }
     var rollbackTargetSha by remember { mutableStateOf<String?>(null) }
     var showDiscardAllConfirm by remember { mutableStateOf(false) }
+    var originUrl by remember { mutableStateOf("") }
+    var hasOriginRemote by remember { mutableStateOf(false) }
+    var newRepoName by remember(project) { mutableStateOf(project) }
+    var isPrivateRepo by remember { mutableStateOf(true) }
+    var newRepoDesc by remember(project) { mutableStateOf("Created with Tablet Agent Studio") }
+    var createNewRepoMode by remember { mutableStateOf(false) }
 
     fun refresh() {
         loading = true
@@ -2351,6 +2342,12 @@ fun GitReviewDialog(
                 val arrLg = lg.optJSONArray("commits")
                 if (arrLg != null) logCommits = (0 until arrLg.length()).map { arrLg.getJSONObject(it) }
                 worktrees = (0 until wt.length()).map { wt.getJSONObject(it) }
+                val arrRem = br.optJSONArray("remotes")
+                hasOriginRemote = arrRem != null && (0 until arrRem.length()).any { arrRem.getString(it) == "origin" }
+                originUrl = br.optString("origin_url", "")
+                if (!hasOriginRemote) {
+                    createNewRepoMode = true
+                }
             } catch (e: Exception) {
                 notify(e)
             } finally {
@@ -2661,9 +2658,9 @@ fun GitReviewDialog(
                                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB)),
                                                 modifier = Modifier.weight(1f)
                                             ) {
-                                                Icon(Icons.Default.CloudUpload, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                Icon(if (hasOriginRemote) Icons.Default.CloudUpload else Icons.Default.AddCircle, contentDescription = null, modifier = Modifier.size(16.dp))
                                                 Spacer(Modifier.width(6.dp))
-                                                Text("↑ Push Remote")
+                                                Text(if (hasOriginRemote) "↑ Push Remote" else "🚀 Create & Push GitHub")
                                             }
                                         }
 
@@ -2995,18 +2992,108 @@ fun GitReviewDialog(
     }
 
     if (showPushDialog) {
+        val ctx = LocalContext.current
+        val hasGh = SecureSecrets.hasKey(ctx, SecureSecrets.KEY_GITHUB)
+        val ghUser = SecureSecrets.getKey(ctx, SecureSecrets.KEY_GITHUB_USER)
+
         AlertDialog(
             onDismissRequest = { if (!pushing) showPushDialog = false },
             title = {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Icon(Icons.Default.CloudUpload, contentDescription = null, tint = Color(0xFF2563EB))
-                    Text("Push Branch to GitHub")
+                    Icon(
+                        if (createNewRepoMode) Icons.Default.AddCircle else Icons.Default.CloudUpload,
+                        contentDescription = null,
+                        tint = Color(0xFF2563EB)
+                    )
+                    Text(if (createNewRepoMode) "Create & Push GitHub Repo" else "Push Branch to GitHub")
                 }
             },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("Branch: ${currentBranch.ifBlank { "HEAD" }} -> origin", fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                    Text("Pushes strictly with your GITHUB_TOKEN over secure loopback authorization. Force-push is disabled.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Column(
+                    modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    if (hasGh) {
+                        Surface(
+                            color = Color(0xFF10B981).copy(alpha = 0.15f),
+                            shape = RoundedCornerShape(4.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(Icons.Default.CheckCircle, null, tint = Color(0xFF10B981), modifier = Modifier.size(14.dp))
+                                Text("GitHub Account: @${ghUser.ifBlank { "authorized" }}", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10B981))
+                            }
+                        }
+                    } else {
+                        Surface(
+                            color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f),
+                            shape = RoundedCornerShape(4.dp)
+                        ) {
+                            Text("Not signed in to GitHub. Please sign in via Settings → Agents & Git.", fontSize = 11.sp, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp))
+                        }
+                    }
+
+                    if (createNewRepoMode) {
+                        Text(
+                            "Creates a new repository under your GitHub account (@$ghUser) and pushes all project files to it.",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        OutlinedTextField(
+                            value = newRepoName,
+                            onValueChange = { newRepoName = it },
+                            label = { Text("Repository Name") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        OutlinedTextField(
+                            value = newRepoDesc,
+                            onValueChange = { newRepoDesc = it },
+                            label = { Text("Description (Optional)") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth().clickable { isPrivateRepo = !isPrivateRepo }
+                        ) {
+                            Checkbox(checked = isPrivateRepo, onCheckedChange = { isPrivateRepo = it })
+                            Spacer(Modifier.width(4.dp))
+                            Column {
+                                Text("Private Repository (Recommended)", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                Text("Only you can access this repo.", fontSize = 10.sp, color = MaterialTheme.colorScheme.outline)
+                            }
+                        }
+
+                        if (hasOriginRemote) {
+                            TextButton(onClick = { createNewRepoMode = false }) {
+                                Text("← Push to existing remote ($originUrl)", fontSize = 11.sp)
+                            }
+                        }
+                    } else {
+                        Text("Branch: ${currentBranch.ifBlank { "HEAD" }} -> origin", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        if (originUrl.isNotBlank()) {
+                            Text("Remote: $originUrl", fontSize = 11.sp, color = MaterialTheme.colorScheme.outline, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        Text("Pushes strictly over secure loopback authorization. Force-push is disabled.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+                        TextButton(
+                            onClick = {
+                                newRepoName = project
+                                createNewRepoMode = true
+                            }
+                        ) {
+                            Icon(Icons.Default.Add, null, modifier = Modifier.size(14.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Create & Push to a New GitHub Repo instead", fontSize = 11.sp)
+                        }
+                    }
                 }
             },
             confirmButton = {
@@ -3015,9 +3102,17 @@ fun GitReviewDialog(
                         pushing = true
                         scope.launch {
                             try {
-                                val res = api.gitPush(project, "origin", currentBranch)
-                                showPushDialog = false
-                                notify(Throwable("Pushed successfully: ${res.optString("branch")}"))
+                                if (createNewRepoMode) {
+                                    val res = api.gitCreateAndPush(project, newRepoName, isPrivateRepo, newRepoDesc)
+                                    showPushDialog = false
+                                    refresh()
+                                    notify(Throwable("Created & Pushed: ${res.optString("html_url", res.optString("repo_name"))}"))
+                                } else {
+                                    val res = api.gitPush(project, "origin", currentBranch)
+                                    showPushDialog = false
+                                    refresh()
+                                    notify(Throwable("Pushed successfully: ${res.optString("branch")}"))
+                                }
                             } catch (e: Exception) {
                                 notify(e)
                             } finally {
@@ -3025,9 +3120,18 @@ fun GitReviewDialog(
                             }
                         }
                     },
-                    enabled = !pushing
+                    enabled = !pushing && hasGh && (!createNewRepoMode || newRepoName.isNotBlank()),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB))
                 ) {
-                    Text(if (pushing) "Pushing…" else "Confirm Push")
+                    if (pushing) {
+                        CircularProgressIndicator(color = Color.White, modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(6.dp))
+                        Text(if (createNewRepoMode) "Creating & Pushing…" else "Pushing…")
+                    } else {
+                        Icon(if (createNewRepoMode) Icons.Default.CloudUpload else Icons.Default.Upload, null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(if (createNewRepoMode) "Create Repo & Push" else "Confirm Push")
+                    }
                 }
             },
             dismissButton = {

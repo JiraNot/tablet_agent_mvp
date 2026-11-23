@@ -2,10 +2,12 @@ package com.tabletagent.local.ui
 
 import android.content.Intent
 import android.net.Uri
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
@@ -16,6 +18,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
@@ -24,6 +27,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.tabletagent.local.runtime.CliAuthState
 import com.tabletagent.local.runtime.OAuthSessionState
 import com.tabletagent.local.runtime.ProviderKeySummary
@@ -103,6 +107,154 @@ fun OfficialCliCard(
                         if (isInstalling) "Installing…" else if (isInstalled) "Update" else "Install",
                         style = MaterialTheme.typography.labelSmall
                     )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun GitHubUnifiedAccountCard(
+    authState: CliAuthState,
+    summary: ProviderKeySummary,
+    gitVersion: String,
+    busy: Boolean,
+    onSignIn: () -> Unit,
+    onSignOut: () -> Unit
+) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(10.dp),
+        border = BorderStroke(
+            1.dp,
+            if (authState.signedIn) Color(0xFF10B981).copy(alpha = 0.5f) else MaterialTheme.colorScheme.outlineVariant
+        ),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            // Header Row
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Surface(
+                    color = if (authState.signedIn) Color(0xFF10B981).copy(alpha = 0.15f) else MaterialTheme.colorScheme.surface,
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            if (authState.signedIn) Icons.Default.CheckCircle else Icons.Default.CloudSync,
+                            contentDescription = null,
+                            tint = if (authState.signedIn) Color(0xFF10B981) else MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+
+                Column(Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(
+                            "GitHub Account (Full Git & Cloud Control)",
+                            fontWeight = FontWeight.Bold,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Surface(
+                            color = if (authState.signedIn) Color(0xFF10B981).copy(alpha = 0.2f) else MaterialTheme.colorScheme.surface,
+                            shape = RoundedCornerShape(4.dp)
+                        ) {
+                            Text(
+                                if (authState.signedIn) "ACTIVE" else "NOT CONNECTED",
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = if (authState.signedIn) Color(0xFF10B981) else MaterialTheme.colorScheme.outline
+                            )
+                        }
+                    }
+                    val userDesc = if (authState.signedIn && summary.githubUser.isNotBlank()) {
+                        "Signed in as @${summary.githubUser}${if (summary.githubEmail.isNotBlank()) " (${summary.githubEmail})" else ""} · $gitVersion"
+                    } else {
+                        "1-Click OAuth Login for full Git access: Push, Pull, Clone, and AI Commits · $gitVersion"
+                    }
+                    Text(
+                        userDesc,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                if (authState.signedIn) {
+                    OutlinedButton(
+                        onClick = onSignOut,
+                        enabled = !busy,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                        modifier = Modifier.height(32.dp)
+                    ) {
+                        Text("Sign Out", style = MaterialTheme.typography.labelSmall)
+                    }
+                } else {
+                    Button(
+                        onClick = onSignIn,
+                        enabled = !busy,
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF24292F)),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                        modifier = Modifier.height(32.dp)
+                    ) {
+                        Icon(Icons.Default.Login, null, modifier = Modifier.size(14.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("1-Click Sign in with GitHub", style = MaterialTheme.typography.labelSmall, color = Color.White)
+                    }
+                }
+            }
+
+            // Unlocked Capabilities Bar
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                val caps = listOf(
+                    Triple("Git Push & Pull", "Direct origin branch sync", authState.signedIn),
+                    Triple("Private Repos", "1-tap clone from projects", authState.signedIn),
+                    Triple("AI Commit Signing", summary.githubUser.ifBlank { "Git identity configured" }, authState.signedIn)
+                )
+                caps.forEach { (title, subtitle, unlocked) ->
+                    Surface(
+                        color = if (unlocked) MaterialTheme.colorScheme.surface.copy(alpha = 0.8f) else MaterialTheme.colorScheme.surface.copy(alpha = 0.4f),
+                        shape = RoundedCornerShape(6.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Column(Modifier.padding(6.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(
+                                    Modifier
+                                        .size(6.dp)
+                                        .clip(CircleShape)
+                                        .background(if (unlocked) Color(0xFF10B981) else MaterialTheme.colorScheme.outline)
+                                )
+                                Spacer(Modifier.width(5.dp))
+                                Text(
+                                    title,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            Text(
+                                subtitle,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontSize = 10.sp,
+                                color = MaterialTheme.colorScheme.outline,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -248,7 +400,14 @@ fun CliOAuthDialog(
 
     AlertDialog(
         onDismissRequest = { if (!state.active) onDone() },
-        title = { Text("Sign in to ${state.cliType} CLI") },
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (state.cliType == "GitHub") {
+                    Icon(Icons.Default.CloudSync, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                }
+                Text(if (state.cliType == "GitHub") "1-Click GitHub Device Login" else "Sign in to ${state.cliType} CLI")
+            }
+        },
         text = {
             Column(
                 Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
@@ -260,15 +419,24 @@ fun CliOAuthDialog(
 
                 if (state.deviceCode.isNotBlank()) {
                     Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = MaterialTheme.shapes.small) {
-                        Row(Modifier.fillMaxWidth().padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Column(Modifier.weight(1f)) {
-                                Text("One-time device code:", style = MaterialTheme.typography.labelSmall)
-                                Text(state.deviceCode, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                        Column(Modifier.fillMaxWidth().padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
+                                    Text("One-time device code:", style = MaterialTheme.typography.labelSmall)
+                                    Text(state.deviceCode, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                                }
+                                FilledTonalButton(onClick = {
+                                    clipboard.setText(AnnotatedString(state.deviceCode))
+                                    copiedMsg = true
+                                }) { Text(if (copiedMsg) "Copied" else "Copy Code") }
                             }
-                            FilledTonalButton(onClick = {
-                                clipboard.setText(AnnotatedString(state.deviceCode))
-                                copiedMsg = true
-                            }) { Text(if (copiedMsg) "Copied" else "Copy Code") }
+                            if (state.cliType == "GitHub") {
+                                Text(
+                                    "Paste this 8-character code at github.com/login/device to grant full Git Push, Pull, Clone, and Commit access.",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                            }
                         }
                     }
                 }
@@ -288,7 +456,7 @@ fun CliOAuthDialog(
                     ) {
                         Icon(Icons.Default.OpenInBrowser, null, Modifier.size(18.dp))
                         Spacer(Modifier.width(6.dp))
-                        Text(if (state.deviceCode.isNotBlank()) "Copy Code & Open Browser" else "Open Sign-In in Browser")
+                        Text(if (state.cliType == "GitHub") "Copy Code & Open GitHub" else if (state.deviceCode.isNotBlank()) "Copy Code & Open Browser" else "Open Sign-In in Browser")
                     }
                     Text(state.oauthUrl, style = MaterialTheme.typography.labelSmall, maxLines = 2, color = MaterialTheme.colorScheme.outline)
                 }
@@ -311,8 +479,20 @@ fun CliOAuthDialog(
                 }
 
                 if (state.completed) {
-                    Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = MaterialTheme.shapes.small) {
-                        Text("Signed in cleanly! Embedded Bridge updated.", Modifier.padding(10.dp), fontWeight = FontWeight.Bold)
+                    Surface(color = Color(0xFF10B981).copy(alpha = 0.2f), shape = MaterialTheme.shapes.small) {
+                        Column(Modifier.fillMaxWidth().padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(
+                                if (state.cliType == "GitHub") "✓ Signed in cleanly to GitHub!" else "Signed in cleanly! Embedded Bridge updated.",
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF10B981)
+                            )
+                            if (state.cliType == "GitHub") {
+                                Text(
+                                    "PRoot git credentials (/root/.git-credentials) and commit author are configured. Full Git operations are now unlocked.",
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            }
+                        }
                     }
                 }
                 if (state.error.isNotBlank()) {

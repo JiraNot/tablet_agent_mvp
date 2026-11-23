@@ -911,9 +911,11 @@ class LocalCore:
         try:
             subprocess.run([git_cmd, 'add', '-A'], cwd=base, capture_output=True, text=True, timeout=15)
             st = subprocess.run([git_cmd, 'status', '--porcelain'], cwd=base, capture_output=True, text=True, timeout=10)
+            gh_user = os.environ.get('GITHUB_USER', '').strip() or 'TabletAgent'
+            gh_email = os.environ.get('GITHUB_EMAIL', '').strip() or 'agent@localhost'
             if st.returncode == 0 and st.stdout.strip():
                 subprocess.run(
-                    [git_cmd, '-c', 'user.name=TabletAgent', '-c', 'user.email=agent@localhost', 'commit', '-m', f'checkpoint({label}): automated snapshot before repair'],
+                    [git_cmd, '-c', f'user.name={gh_user}', '-c', f'user.email={gh_email}', 'commit', '-m', f'checkpoint({label}): automated snapshot before repair'],
                     cwd=base, capture_output=True, text=True, timeout=15
                 )
             rev = subprocess.run([git_cmd, 'rev-parse', 'HEAD'], cwd=base, capture_output=True, text=True, timeout=10)
@@ -1839,7 +1841,7 @@ class LocalCore:
             self.set_status(task_id, 'PLANNING' if mode=='plan' else 'EXECUTING')
             policy = ('Plan only. Do not edit files or run mutating commands. Provide concise steps and test strategy.'
                       if mode=='plan' else
-                      'You may edit files under the current workspace. Keep changes scoped; run relevant tests. Never read or disclose .env files, keys, or credentials. Do not git push or deploy. Explain what changed and tests actually executed.')
+                      'You may edit files under the current workspace. Keep changes scoped; run relevant tests. Never read or disclose .env files, keys, or credentials. Do not git push or deploy unless explicitly requested by the user. Explain what changed and tests actually executed.')
             instructions = ''
             for ins_name in ['AGENTS.md', 'CLAUDE.md', '.agents.md']:
                 ins_p = project_path / ins_name
@@ -2173,7 +2175,15 @@ class LocalCore:
             res_add = subprocess.run([git_cmd, 'add', '-A'], cwd=base, capture_output=True, text=True, timeout=15)
             if res_add.returncode != 0:
                 raise BridgeError(f'Git add failed: {res_add.stderr.strip()}')
-            res_commit = subprocess.run([git_cmd, 'commit', '-m', msg], cwd=base, capture_output=True, text=True, timeout=15)
+            commit_cmd = [git_cmd]
+            gh_user = os.environ.get('GITHUB_USER', '').strip()
+            gh_email = os.environ.get('GITHUB_EMAIL', '').strip()
+            if gh_user:
+                commit_cmd += ['-c', f'user.name={gh_user}']
+            if gh_email:
+                commit_cmd += ['-c', f'user.email={gh_email}']
+            commit_cmd += ['commit', '-m', msg]
+            res_commit = subprocess.run(commit_cmd, cwd=base, capture_output=True, text=True, timeout=15)
             if res_commit.returncode != 0:
                 if 'nothing to commit' in res_commit.stdout or 'nothing to commit' in res_commit.stderr:
                     return {'success': True, 'committed': False, 'message': 'Nothing to commit, working tree clean'}
@@ -2215,7 +2225,12 @@ class LocalCore:
             branches.insert(0, current)
         rem_res = subprocess.run([git_cmd, 'remote'], cwd=base, capture_output=True, text=True, timeout=10)
         remotes = [r.strip() for r in rem_res.stdout.splitlines() if r.strip()] if rem_res.returncode == 0 else []
-        return {'is_git': True, 'current': current, 'branches': branches, 'remotes': remotes}
+        origin_url = ''
+        if 'origin' in remotes:
+            url_res = subprocess.run([git_cmd, 'remote', 'get-url', 'origin'], cwd=base, capture_output=True, text=True, timeout=5)
+            if url_res.returncode == 0:
+                origin_url = url_res.stdout.strip()
+        return {'is_git': True, 'current': current, 'branches': branches, 'remotes': remotes, 'origin_url': origin_url}
 
     def git_checkout(self, project: str, branch: str, create: bool = False) -> dict[str, Any]:
         base = self._project(project)
@@ -2257,6 +2272,127 @@ class LocalCore:
         if res.returncode != 0:
             raise BridgeError(f'Git push failed: {combined[:300]}', 422)
         return {'success': True, 'remote': rem, 'branch': target_branch, 'output': combined[:1000]}
+
+    def git_create_and_push(self, project: str, repo_name: str = '', is_private: bool = True, description: str = '') -> dict[str, Any]:
+        base = self._project(project)
+        git_cmd = shutil.which('git') or 'git'
+        gh_token = os.environ.get('GITHUB_TOKEN', '').strip()
+        if not gh_token:
+            raise BridgeError('GitHub authentication required. Please sign in via Settings → Agents & Git.', 401)
+
+        # 1. Ensure local git repository exists
+        if not (base / '.git').exists():
+            subprocess.run([git_cmd, 'init', '-q', str(base)], check=True, timeout=15)
+            gi = base / '.gitignore'
+            if not gi.exists():
+                gi.write_text('node_modules/\ndist/\n.next/\n.venv/\n__pycache__/\n.gradle/\n.env\n.env.*\n!.env.example\n', encoding='utf-8')
+
+        gh_user = os.environ.get('GITHUB_USER', '').strip()
+        gh_email = os.environ.get('GITHUB_EMAIL', '').strip()
+
+        # 2. Stage and commit files if no commits exist or working tree has changes
+        rev_head = subprocess.run([git_cmd, 'rev-parse', 'HEAD'], cwd=base, capture_output=True, text=True, timeout=5)
+        has_head = rev_head.returncode == 0
+        st_res = subprocess.run([git_cmd, 'status', '--porcelain'], cwd=base, capture_output=True, text=True, timeout=10)
+        has_changes = bool(st_res.stdout.strip())
+
+        if not has_head or has_changes:
+            subprocess.run([git_cmd, 'add', '-A'], cwd=base, capture_output=True, timeout=15)
+            commit_cmd = [git_cmd]
+            if gh_user:
+                commit_cmd += ['-c', f'user.name={gh_user}']
+            if gh_email:
+                commit_cmd += ['-c', f'user.email={gh_email}']
+            commit_cmd += ['commit', '-m', f'Initial commit: {project}']
+            subprocess.run(commit_cmd, cwd=base, capture_output=True, timeout=15)
+
+        # 3. Ensure target branch is main or active branch
+        cur_br = subprocess.run([git_cmd, 'rev-parse', '--abbrev-ref', 'HEAD'], cwd=base, capture_output=True, text=True, timeout=5)
+        target_branch = cur_br.stdout.strip() if cur_br.returncode == 0 and cur_br.stdout.strip() != 'HEAD' else 'main'
+        if target_branch == 'HEAD' or not target_branch:
+            subprocess.run([git_cmd, 'branch', '-M', 'main'], cwd=base, capture_output=True, timeout=10)
+            target_branch = 'main'
+
+        # 4. Safe repo name
+        safe_repo = re.sub(r'[^a-zA-Z0-9._-]', '-', (repo_name or project).strip())[:100]
+        if not safe_repo:
+            safe_repo = project
+
+        # 5. Call GitHub REST API to create repository
+        import urllib.request
+        import urllib.error
+        payload = {
+            'name': safe_repo,
+            'description': description or f'Project {project} created with Tablet Agent Studio',
+            'private': bool(is_private),
+            'auto_init': False
+        }
+        req = urllib.request.Request(
+            'https://api.github.com/user/repos',
+            data=json.dumps(payload).encode('utf-8'),
+            headers={
+                'Authorization': f'Bearer {gh_token}',
+                'Accept': 'application/vnd.github+json',
+                'Content-Type': 'application/json',
+                'User-Agent': 'TabletAgentStudio/0.1'
+            },
+            method='POST'
+        )
+        clone_url = ''
+        html_url = ''
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                resp_data = json.loads(resp.read().decode('utf-8'))
+                clone_url = resp_data.get('clone_url', '')
+                html_url = resp_data.get('html_url', '')
+        except urllib.error.HTTPError as he:
+            err_body = he.read().decode('utf-8', errors='replace')
+            if he.code == 422 and 'already exists' in err_body:
+                if gh_user:
+                    clone_url = f'https://github.com/{gh_user}/{safe_repo}.git'
+                    html_url = f'https://github.com/{gh_user}/{safe_repo}'
+                else:
+                    raise BridgeError(f'Repository "{safe_repo}" already exists on GitHub.', 409)
+            else:
+                clean_err = REDACTION.sub('[REDACTED]', err_body[:300])
+                raise BridgeError(f'GitHub API error ({he.code}): {clean_err}', he.code)
+        except Exception as e:
+            raise BridgeError(f'Failed to connect to GitHub: {e}', 502)
+
+        if not clone_url:
+            raise BridgeError('GitHub did not return a valid clone URL', 502)
+
+        # 6. Set or update remote origin
+        rem_res = subprocess.run([git_cmd, 'remote'], cwd=base, capture_output=True, text=True, timeout=5)
+        remotes = [r.strip() for r in rem_res.stdout.splitlines() if r.strip()] if rem_res.returncode == 0 else []
+        if 'origin' in remotes:
+            subprocess.run([git_cmd, 'remote', 'set-url', 'origin', clone_url], cwd=base, capture_output=True, timeout=10)
+        else:
+            subprocess.run([git_cmd, 'remote', 'add', 'origin', clone_url], cwd=base, capture_output=True, timeout=10)
+
+        # 7. Push branch to GitHub
+        import base64
+        basic = base64.b64encode(f'x-access-token:{gh_token}'.encode('utf-8')).decode('ascii')
+        push_env = os.environ.copy()
+        push_env['GIT_TERMINAL_PROMPT'] = '0'
+        push_cmd = [
+            git_cmd,
+            '-c', f'http.https://github.com/.extraheader=AUTHORIZATION: basic {basic}',
+            'push', '-u', 'origin', target_branch
+        ]
+        res = subprocess.run(push_cmd, cwd=base, capture_output=True, text=True, timeout=60, env=push_env)
+        combined = REDACTION.sub('[REDACTED]', (res.stdout + '\n' + res.stderr).strip())
+        if res.returncode != 0:
+            raise BridgeError(f'Created repo on GitHub ({html_url}), but push failed: {combined[:300]}', 422)
+
+        return {
+            'success': True,
+            'repo_name': safe_repo,
+            'html_url': html_url,
+            'clone_url': clone_url,
+            'branch': target_branch,
+            'output': f'Created GitHub repository {html_url} and pushed branch {target_branch} successfully.'
+        }
 
     def git_checkpoint(self, project: str, label: str = 'apply-to-file') -> dict[str, Any]:
         safe_label = re.sub(r'[^a-zA-Z0-9._-]', '-', label or 'manual')[:40]
