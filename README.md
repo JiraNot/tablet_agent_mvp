@@ -1,8 +1,20 @@
-# Tablet Agent — Android-native Prompt-first Development Workspace (MVP)
+# OmniDev Tablet — Android-native Prompt-first Agentic AI Development Studio
 
-**Status: SOURCE MVP — VERIFIED LOCAL BUILD & COMPOSABLE APK.** Last updated: 22 November 2026.
+**Status: FULL VERSION MVP — VERIFIED EMBEDDED PRoot RUNTIME & ON-DEVICE APK.** Last updated: 23 November 2026.
 
-This is an independently written Android native app (Kotlin + Jetpack Compose) and a **local** Python agent supervisor running on **the same Android tablet** in Termux. It is not a browser-based IDE and needs no remote PC, VPS, SSH tunnel, or cloud server. Codex still needs an authenticated account and internet access to call its model.
+OmniDev Tablet is an independently written native Android app (Kotlin + Jetpack Compose) and local agentic AI supervisor running **entirely on the Android tablet itself** (powered by an embedded Alpine PRoot Linux userland). It requires no remote PC, VPS, SSH tunnel, or cloud dev server.
+
+## Highlights & Features
+
+- **Rebranded OmniDev Tablet**: Dedicated Android app with glowing 3D prism cube icon across all Android screen densities (`mdpi`, `hdpi`, `xhdpi`, `xxhdpi`, `xxxhdpi`).
+- **Quick Attachment Sheet & Media Picker**: One-tap popup sheet supporting Photos & Images (`image/*`), Video Clips (`video/*`), Documents & Code (`*/*`), and Project Workspace Files with 1-tap quick suggestion chips (`package.json`, `README.md`, `src/App.tsx`, `src/index.ts`).
+- **Tap-to-Speak Voice Prompt**: Integrated Google Speech Recognition (`RecognizerIntent.ACTION_RECOGNIZE_SPEECH`) supporting Thai (`th-TH`) and English (`en-US`) directly beside the composer.
+- **Aion Multi-Agent Orchestrator**: Seamless mid-conversation switching between official CLI agents (`Codex`, `Claude Code`, `Antigravity`) in a single chat thread, with cross-agent handoff context synthesis and automatic quota failover.
+- **Hermes Episodic Memory Ledger**: Persistent project knowledge base stored in `.agents/memory.md` with trackable successes, pitfalls, patterns, and interactive UI viewer.
+- **Android App Builder & 1-Click APK Installer**: Automatic discovery of built `.apk` binaries (`/v1/projects/{name}/apks`), APK Ready Banner, and one-click installation via native Android `FileProvider` (`Intent.ACTION_VIEW`).
+- **Single-Click Project Zip Export & Import**: Declarative `.zip` export and import (`POST /v1/projects/{name}/export`, `POST /v1/projects/import`) preserving Git history and SQLite logs.
+- **Embedded Zero-Termux Alpine PRoot Runtime**: Bundled Alpine Linux `aarch64` rootfs (Node.js 22, Git 2.47, Python 3.12, NPM 10) and one-click in-app installer for official OpenAI Codex CLI, Google Antigravity CLI, and Anthropic Claude Code.
+- **Durable Background Execution**: Native Android Foreground Service (`AgentForegroundService.kt`) with WakeLock and ongoing progress notification, keeping agent tasks alive through screen suspension.
 
 ## Agent instructions and delivery plan
 

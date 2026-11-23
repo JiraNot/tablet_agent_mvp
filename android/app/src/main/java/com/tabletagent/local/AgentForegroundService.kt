@@ -52,7 +52,7 @@ class AgentForegroundService : Service() {
 
                 acquireWakeLock()
                 val notification = buildNotification(
-                    title = "Tablet Agent: $currentProject",
+                    title = "OmniDev Tablet: $currentProject",
                     text = "[$currentStatus] ${currentPrompt.take(80)}"
                 )
 
@@ -81,7 +81,7 @@ class AgentForegroundService : Service() {
                     }
 
                     val notification = buildNotification(
-                        title = "Tablet Agent: $currentProject",
+                        title = "OmniDev Tablet: $currentProject",
                         text = text
                     )
                     val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -156,7 +156,7 @@ class AgentForegroundService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "Tablet Agent Tasks",
+                "OmniDev Tablet Tasks",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
                 description = "Shows progress and prevents background suspension during active agent runs"

@@ -47,8 +47,27 @@ import androidx.compose.ui.unit.sp
 import com.tabletagent.local.runtime.AllCliAuthStatus
 import com.tabletagent.local.runtime.CliAuthManager
 import com.tabletagent.local.runtime.GitHubRepoItem
+import android.app.Activity
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.provider.OpenableColumns
+import android.speech.RecognizerIntent
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.platform.LocalContext
+import java.util.Locale
 import kotlinx.coroutines.delay
 import org.json.JSONObject
+
+data class AttachmentItem(
+    val name: String,
+    val path: String,
+    val type: String, // "image", "video", "document", "workspace"
+    val sizeBytes: Long = 0,
+    val uriString: String? = null
+)
 
 fun aionClaudeLightScheme(): ColorScheme = lightColorScheme(
     primary = Color(0xFF2563EB),
@@ -300,13 +319,13 @@ fun AionClaudeSidebar(
                 Spacer(Modifier.width(8.dp))
                 Column(Modifier.weight(1f)) {
                     Text(
-                        "Tablet Agent",
+                        "OmniDev Tablet",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold,
                         maxLines = 1
                     )
                     Text(
-                        "AI Coding Studio",
+                        "Agentic AI Studio",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1
@@ -821,6 +840,235 @@ fun ClaudeCodeTopBar(
     }
 }
 
+private fun getFileNameFromUri(context: Context, uri: Uri): String {
+    var result: String? = null
+    if (uri.scheme == "content") {
+        try {
+            context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (idx != -1) {
+                        result = cursor.getString(idx)
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+    }
+    if (result.isNullOrBlank()) {
+        result = uri.lastPathSegment
+    }
+    return result ?: "attachment_${System.currentTimeMillis()}"
+}
+
+@Composable
+private fun AttachmentChipsRow(
+    attachments: List<AttachmentItem>,
+    onRemove: (AttachmentItem) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    if (attachments.isEmpty()) return
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        attachments.forEach { item ->
+            val icon = when (item.type) {
+                "image" -> Icons.Default.Image
+                "video" -> Icons.Default.VideoLibrary
+                "document" -> Icons.Default.Description
+                else -> Icons.Default.FolderOpen
+            }
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                shape = RoundedCornerShape(16.dp),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                ) {
+                    Icon(
+                        icon,
+                        contentDescription = null,
+                        modifier = Modifier.size(14.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(Modifier.width(5.dp))
+                    Text(
+                        item.name,
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.widthIn(max = 140.dp)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Icon(
+                        Icons.Default.Close,
+                        contentDescription = "Remove",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .size(14.dp)
+                            .clickable { onRemove(item) }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun QuickAttachmentDialog(
+    onDismiss: () -> Unit,
+    onPickImage: () -> Unit,
+    onPickVideo: () -> Unit,
+    onPickDoc: () -> Unit,
+    onPickWorkspace: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.AttachFile,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(Modifier.width(8.dp))
+                Text("Attach Files & Media", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    "Select media or documents from tablet storage or choose a file from the workspace:",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(4.dp))
+
+                // 1. Photos & Images
+                Surface(
+                    onClick = { onPickImage(); onDismiss() },
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                    ) {
+                        Surface(
+                            shape = CircleShape,
+                            color = Color(0xFF3B82F6).copy(alpha = 0.15f),
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(Icons.Default.Image, contentDescription = null, tint = Color(0xFF3B82F6), modifier = Modifier.size(20.dp))
+                            }
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Column {
+                            Text("Photos & Images", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+                            Text("Screenshots, mockups, UI designs (.png, .jpg, .webp)", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+
+                // 2. Videos
+                Surface(
+                    onClick = { onPickVideo(); onDismiss() },
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                    ) {
+                        Surface(
+                            shape = CircleShape,
+                            color = Color(0xFF8B5CF6).copy(alpha = 0.15f),
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(Icons.Default.VideoLibrary, contentDescription = null, tint = Color(0xFF8B5CF6), modifier = Modifier.size(20.dp))
+                            }
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Column {
+                            Text("Video Clips", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+                            Text("Screen recordings, UI bugs, animations (.mp4, .mkv)", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+
+                // 3. Documents
+                Surface(
+                    onClick = { onPickDoc(); onDismiss() },
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                    ) {
+                        Surface(
+                            shape = CircleShape,
+                            color = Color(0xFF10B981).copy(alpha = 0.15f),
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(Icons.Default.Description, contentDescription = null, tint = Color(0xFF10B981), modifier = Modifier.size(20.dp))
+                            }
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Column {
+                            Text("Documents & Files", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+                            Text("Specifications, logs, configs (.pdf, .txt, .json, .md)", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+
+                // 4. Workspace File
+                Surface(
+                    onClick = { onPickWorkspace(); onDismiss() },
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                    ) {
+                        Surface(
+                            shape = CircleShape,
+                            color = Color(0xFFF59E0B).copy(alpha = 0.15f),
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(Icons.Default.FolderOpen, contentDescription = null, tint = Color(0xFFF59E0B), modifier = Modifier.size(20.dp))
+                            }
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Column {
+                            Text("Project Workspace File", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+                            Text("Relative file path in current project workspace", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Close") }
+        }
+    )
+}
+
 @Composable
 fun AionClaudeAgentPane(
     prompt: String,
@@ -888,46 +1136,146 @@ fun AionClaudeAgentPane(
     val models = currAgentObj?.optJSONArray("models")?.let { arr -> (0 until arr.length()).map { arr.getString(it) } } ?: listOf("default")
     val selectedAgentDisplay = visibleAgents.firstOrNull { it.first == selectedAgent }?.second ?: selectedAgent
 
-    var attachment by rememberSaveable { mutableStateOf("") }
-    var showAttachDialog by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    var attachments by remember { mutableStateOf<List<AttachmentItem>>(emptyList()) }
+    var showQuickAttachDialog by remember { mutableStateOf(false) }
+    var showWorkspaceFileDialog by remember { mutableStateOf(false) }
     var modelMenuExpanded by remember { mutableStateOf(false) }
     var projectMenuExpanded by remember { mutableStateOf(false) }
     var agentMenuExpanded by remember { mutableStateOf(false) }
 
-    if (showAttachDialog) {
-        var tempPath by remember { mutableStateOf(attachment) }
+    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
+        uri?.let {
+            val name = getFileNameFromUri(context, it)
+            attachments = attachments + AttachmentItem(name = name, path = it.toString(), type = "image", uriString = it.toString())
+        }
+    }
+
+    val videoPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
+        uri?.let {
+            val name = getFileNameFromUri(context, it)
+            attachments = attachments + AttachmentItem(name = name, path = it.toString(), type = "video", uriString = it.toString())
+        }
+    }
+
+    val docPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
+        uri?.let {
+            val name = getFileNameFromUri(context, it)
+            attachments = attachments + AttachmentItem(name = name, path = it.toString(), type = "document", uriString = it.toString())
+        }
+    }
+
+    val speechLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
+        if (res.resultCode == Activity.RESULT_OK) {
+            val matches = res.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+            if (!matches.isNullOrEmpty()) {
+                val spoken = matches[0].trim()
+                if (spoken.isNotBlank()) {
+                    onPrompt(if (prompt.isBlank()) spoken else "$prompt $spoken")
+                }
+            }
+        }
+    }
+
+    val onVoiceInput = {
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
+            putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak your prompt for OmniDev...")
+        }
+        try {
+            speechLauncher.launch(intent)
+        } catch (_: Exception) {
+            Toast.makeText(context, "Voice recognition not available on device", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    val doSendWithAttachments = {
+        var finalPrompt = prompt.trim()
+        if (attachments.isNotEmpty()) {
+            val linesList = attachments.map {
+                when (it.type) {
+                    "image" -> "[Attachment Image: ${it.name}]"
+                    "video" -> "[Attachment Video: ${it.name}]"
+                    "document" -> "[Attachment Document: ${it.name}]"
+                    else -> "[Attachment File: ${it.path}]"
+                }
+            }
+            val attStr = linesList.joinToString("\n")
+            if (!finalPrompt.contains("[Attachment")) {
+                finalPrompt = if (finalPrompt.isBlank()) attStr else "$finalPrompt\n\n$attStr"
+                onPrompt(finalPrompt)
+            }
+            attachments = emptyList()
+        }
+        onSend()
+    }
+
+    if (showQuickAttachDialog) {
+        QuickAttachmentDialog(
+            onDismiss = { showQuickAttachDialog = false },
+            onPickImage = { imagePicker.launch("image/*") },
+            onPickVideo = { videoPicker.launch("video/*") },
+            onPickDoc = { docPicker.launch("*/*") },
+            onPickWorkspace = { showWorkspaceFileDialog = true }
+        )
+    }
+
+    if (showWorkspaceFileDialog) {
+        var tempPath by remember { mutableStateOf("") }
         AlertDialog(
-            onDismissRequest = { showAttachDialog = false },
+            onDismissRequest = { showWorkspaceFileDialog = false },
             title = { Text("Attach Workspace File") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        "Privacy Warning: File contents will be added to the agent context. Never attach files containing secrets, API keys, or private tokens.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error
-                    )
+                    Text("File contents will be added to the agent context.", style = MaterialTheme.typography.bodySmall)
                     OutlinedTextField(
                         value = tempPath,
                         onValueChange = { tempPath = it },
                         label = { Text("Workspace relative path") },
-                        placeholder = { Text("package.json or src/index.ts") },
+                        placeholder = { Text("package.json or src/App.tsx") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.horizontalScroll(rememberScrollState())
+                    ) {
+                        listOf("package.json", "README.md", "src/App.tsx", "src/index.ts").forEach { quickFile ->
+                            Surface(
+                                onClick = {
+                                    attachments = attachments + AttachmentItem(name = quickFile.substringAfterLast('/'), path = quickFile, type = "workspace")
+                                    showWorkspaceFileDialog = false
+                                },
+                                shape = RoundedCornerShape(8.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                            ) {
+                                Text(
+                                    quickFile,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
+                    }
                 }
             },
             confirmButton = {
                 TextButton(onClick = {
-                    attachment = tempPath.trim()
-                    showAttachDialog = false
+                    val p = tempPath.trim()
+                    if (p.isNotBlank()) {
+                        attachments = attachments + AttachmentItem(name = p.substringAfterLast('/'), path = p, type = "workspace")
+                    }
+                    showWorkspaceFileDialog = false
                 }) { Text("Confirm Attachment") }
             },
             dismissButton = {
-                TextButton(onClick = { showAttachDialog = false }) { Text("Cancel") }
+                TextButton(onClick = { showWorkspaceFileDialog = false }) { Text("Cancel") }
             }
         )
     }
-
     val currentTask = tasks.firstOrNull { it.optString("id") == selectedTask }
 
     if (isNewChatMode || selectedTask.isBlank() || currentTask == null) {
@@ -1540,15 +1888,10 @@ fun AionClaudeAgentPane(
                             maxLines = 6
                         )
 
-                        if (attachment.isNotBlank()) {
-                            InputChip(
-                                selected = true,
-                                onClick = { attachment = "" },
-                                label = { Text("📎 $attachment", style = MaterialTheme.typography.labelSmall) },
-                                trailingIcon = { Icon(Icons.Default.Close, null, Modifier.size(14.dp)) }
-                            )
-                            Spacer(Modifier.height(4.dp))
-                        }
+                        AttachmentChipsRow(
+                            attachments = attachments,
+                            onRemove = { att -> attachments = attachments - att }
+                        )
 
                         // Integrated Bottom Bar inside Composer Card (like AionUI homepage.png)
                         Row(
@@ -1556,7 +1899,7 @@ fun AionClaudeAgentPane(
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             FilledTonalIconButton(
-                                onClick = { showAttachDialog = true },
+                                onClick = { showQuickAttachDialog = true },
                                 modifier = Modifier.size(32.dp)
                             ) {
                                 Icon(Icons.Default.Add, contentDescription = "Attach", modifier = Modifier.size(16.dp))
@@ -1760,15 +2103,28 @@ fun AionClaudeAgentPane(
 
                             Spacer(Modifier.width(8.dp))
 
-                            // Circular Send Button (AionUI style)
-                            val sendEnabled = canRun && prompt.isNotBlank() && isSelectedVisible
+                            // Voice Input Button
                             IconButton(
-                                onClick = {
-                                    if (attachment.isNotBlank() && !prompt.contains("[Attachment: $attachment]")) {
-                                        onPrompt("$prompt\n\n[Attachment: $attachment]")
-                                    }
-                                    onSend()
-                                },
+                                onClick = { onVoiceInput() },
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(CircleShape)
+                                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                            ) {
+                                Icon(
+                                    Icons.Default.Mic,
+                                    contentDescription = "Voice Input",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+
+                            Spacer(Modifier.width(6.dp))
+
+                            // Circular Send Button
+                            val sendEnabled = canRun && (prompt.isNotBlank() || attachments.isNotEmpty()) && isSelectedVisible
+                            IconButton(
+                                onClick = { doSendWithAttachments() },
                                 enabled = sendEnabled,
                                 modifier = Modifier
                                     .size(36.dp)
@@ -2156,6 +2512,14 @@ fun AionClaudeAgentPane(
                 tonalElevation = 1.dp,
                 modifier = Modifier.fillMaxWidth()
             ) {
+                Column(Modifier.fillMaxWidth()) {
+                    if (attachments.isNotEmpty()) {
+                        AttachmentChipsRow(
+                            attachments = attachments,
+                            onRemove = { att -> attachments = attachments - att },
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 2.dp)
+                        )
+                    }
                 Surface(
                     color = MaterialTheme.colorScheme.surface,
                     shape = RoundedCornerShape(20.dp),
@@ -2172,12 +2536,12 @@ fun AionClaudeAgentPane(
                             modifier = Modifier
                                 .size(28.dp)
                                 .clip(CircleShape)
-                                .clickable { showAttachDialog = true }
+                                .clickable { showQuickAttachDialog = true }
                         ) {
                             Icon(
                                 Icons.Default.AttachFile,
                                 contentDescription = "Attach file",
-                                tint = if (attachment.isNotBlank()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                tint = if (attachments.isNotEmpty()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.size(16.dp)
                             )
                         }
@@ -2369,7 +2733,25 @@ fun AionClaudeAgentPane(
                             Spacer(Modifier.width(4.dp))
                         }
 
-                        val sendEnabled = canRun && prompt.isNotBlank() && isSelectedVisible
+                        // Voice Prompt Mic Button
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier
+                                .size(30.dp)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.surfaceVariant)
+                                .clickable { onVoiceInput() }
+                        ) {
+                            Icon(
+                                Icons.Default.Mic,
+                                contentDescription = "Voice Prompt",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                        Spacer(Modifier.width(4.dp))
+
+                        val sendEnabled = canRun && (prompt.isNotBlank() || attachments.isNotEmpty()) && isSelectedVisible
                         Box(
                             contentAlignment = Alignment.Center,
                             modifier = Modifier
@@ -2380,10 +2762,7 @@ fun AionClaudeAgentPane(
                                     else MaterialTheme.colorScheme.surfaceVariant
                                 )
                                 .clickable(enabled = sendEnabled) {
-                                    if (attachment.isNotBlank() && !prompt.contains("[Attachment: $attachment]")) {
-                                        onPrompt("$prompt\n\n[Attachment: $attachment]")
-                                    }
-                                    onSend()
+                                    doSendWithAttachments()
                                 }
                         ) {
                             Icon(
@@ -2394,6 +2773,7 @@ fun AionClaudeAgentPane(
                             )
                         }
                     }
+                }
                 }
             }
         }
