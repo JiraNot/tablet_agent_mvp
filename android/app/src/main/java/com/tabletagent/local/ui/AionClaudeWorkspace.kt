@@ -591,6 +591,7 @@ fun ClaudeCodeTopBar(
     workspaceView: Int,
     onSelectWorkspaceView: (Int) -> Unit,
     onOpenGit: () -> Unit,
+    onOpenSlm: () -> Unit = {},
     apks: List<JSONObject> = emptyList(),
     onInstallApk: (String) -> Unit = {},
     onExportProject: () -> Unit = {},
@@ -816,6 +817,23 @@ fun ClaudeCodeTopBar(
                                 contentDescription = "Git",
                                 modifier = Modifier.size(14.dp),
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        // Compact Icon Button for Offline SLM
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier
+                                .size(28.dp)
+                                .clip(RoundedCornerShape(7.dp))
+                                .background(MaterialTheme.colorScheme.surfaceVariant)
+                                .clickable { onOpenSlm() }
+                        ) {
+                            Icon(
+                                Icons.Default.Memory,
+                                contentDescription = "Offline SLM",
+                                modifier = Modifier.size(14.dp),
+                                tint = Color(0xFF10B981)
                             )
                         }
 

@@ -1014,12 +1014,77 @@ class LocalCore:
         for d in [Path('/root/models'), Path.home() / 'models', Path('/data/data/com.tabletagent.local/files/runtime/rootfs/root/models')]:
             if d.exists():
                 models += [f.name for f in d.glob('*.gguf')]
+        progress = getattr(self, '_slm_download_progress', None)
         return {
             'installed': available,
             'binary': adapter.binary if adapter else 'llama-cli',
             'models': list(set(models)),
-            'default_model': 'qwen2.5-coder-1.5b-q4'
+            'default_model': 'qwen2.5-coder-1.5b-q4',
+            'available_to_download': [
+                {'key': 'qwen2.5-coder-0.5b', 'name': 'Qwen 2.5 Coder 0.5B (Ultra-Light)', 'size': '390 MB', 'speed': 'Very Fast'},
+                {'key': 'qwen2.5-coder-1.5b', 'name': 'Qwen 2.5 Coder 1.5B (Recommended)', 'size': '1.1 GB', 'speed': 'Fast & Accurate'},
+                {'key': 'qwen2.5-coder-3b', 'name': 'Qwen 2.5 Coder 3B (Deep Reasoning)', 'size': '1.9 GB', 'speed': 'High Capability'}
+            ],
+            'download_progress': progress
         }
+
+    def slm_download(self, payload: dict[str, Any]) -> dict[str, Any]:
+        model_key = payload.get('model', 'qwen2.5-coder-1.5b')
+        models_map = {
+            'qwen2.5-coder-0.5b': {
+                'filename': 'qwen2.5-coder-0.5b-instruct-q4_k_m.gguf',
+                'url': 'https://huggingface.co/Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF/resolve/main/qwen2.5-coder-0.5b-instruct-q4_k_m.gguf',
+                'size_mb': 390
+            },
+            'qwen2.5-coder-1.5b': {
+                'filename': 'qwen2.5-coder-1.5b-instruct-q4_k_m.gguf',
+                'url': 'https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF/resolve/main/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf',
+                'size_mb': 1117
+            },
+            'qwen2.5-coder-3b': {
+                'filename': 'qwen2.5-coder-3b-instruct-q4_k_m.gguf',
+                'url': 'https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/resolve/main/qwen2.5-coder-3b-instruct-q4_k_m.gguf',
+                'size_mb': 1930
+            }
+        }
+        info = models_map.get(model_key, models_map['qwen2.5-coder-1.5b'])
+        target_dir = Path('/root/models')
+        target_dir.mkdir(parents=True, exist_ok=True)
+        dest = target_dir / info['filename']
+        if dest.is_file() and dest.stat().st_size > 100_000_000:
+            return {'status': 'completed', 'model': model_key, 'path': str(dest), 'size_mb': round(dest.stat().st_size / (1024*1024), 1)}
+
+        if getattr(self, '_slm_download_thread', None) and self._slm_download_thread.is_alive():
+            return {'status': 'in_progress', 'progress': getattr(self, '_slm_download_progress', {})}
+
+        def _worker():
+            self._slm_download_progress = {'model': model_key, 'percent': 0, 'downloaded_mb': 0, 'total_mb': info['size_mb'], 'status': 'downloading'}
+            try:
+                cmd = ['curl', '-L', '-C', '-', info['url'], '-o', str(dest) + '.part']
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                while proc.poll() is None:
+                    time.sleep(1.0)
+                    part_file = dest.parent / (dest.name + '.part')
+                    if part_file.exists():
+                        cur_size = part_file.stat().st_size
+                        cur_mb = round(cur_size / (1024 * 1024), 1)
+                        pct = min(99, int((cur_mb / info['size_mb']) * 100))
+                        self._slm_download_progress['percent'] = pct
+                        self._slm_download_progress['downloaded_mb'] = cur_mb
+                if proc.returncode == 0:
+                    part_file = dest.parent / (dest.name + '.part')
+                    if part_file.exists():
+                        part_file.rename(dest)
+                    self._slm_download_progress['percent'] = 100
+                    self._slm_download_progress['status'] = 'completed'
+                else:
+                    self._slm_download_progress['status'] = 'failed'
+            except Exception as e:
+                self._slm_download_progress['status'] = f'error: {e}'
+
+        self._slm_download_thread = threading.Thread(target=_worker, daemon=True, name='slm-dl')
+        self._slm_download_thread.start()
+        return {'status': 'started', 'model': model_key, 'total_mb': info['size_mb']}
 
     def slm_setup(self, payload: dict[str, Any]) -> dict[str, Any]:
         action = payload.get('action', 'check')
@@ -2197,6 +2262,138 @@ class LocalCore:
         safe_label = re.sub(r'[^a-zA-Z0-9._-]', '-', label or 'manual')[:40]
         sha = self.create_git_checkpoint(project, safe_label)
         return {'success': True, 'sha': sha or '', 'label': safe_label}
+
+    def git_log(self, project: str, limit: int = 50) -> dict[str, Any]:
+        base = self._project(project)
+        git_cmd = shutil.which('git') or 'git'
+        if not (base / '.git').exists():
+            return {'is_git': False, 'commits': []}
+        lim = max(1, min(100, int(limit)))
+        fmt = '%H%x1f%h%x1f%an%x1f%ar%x1f%s'
+        res = subprocess.run([git_cmd, 'log', f'-n{lim}', f'--pretty=format:{fmt}'], cwd=base, capture_output=True, text=True, timeout=10)
+        commits = []
+        if res.returncode == 0 and res.stdout.strip():
+            for line in res.stdout.strip().splitlines():
+                parts = line.split('\x1f')
+                if len(parts) >= 5:
+                    commits.append({
+                        'full_hash': parts[0],
+                        'hash': parts[1],
+                        'author': parts[2],
+                        'relative_time': parts[3],
+                        'message': REDACTION.sub('[REDACTED]', parts[4])
+                    })
+        return {'is_git': True, 'commits': commits}
+
+    def git_pull(self, project: str, remote: str = 'origin', branch: str = '') -> dict[str, Any]:
+        base = self._project(project)
+        rem = (remote or 'origin').strip()
+        if not NAME_RE.fullmatch(rem):
+            raise BridgeError('Invalid git remote name')
+        git_cmd = shutil.which('git') or 'git'
+        target_branch = branch.strip()
+        if not target_branch:
+            cur_res = subprocess.run([git_cmd, 'rev-parse', '--abbrev-ref', 'HEAD'], cwd=base, capture_output=True, text=True, timeout=10)
+            target_branch = cur_res.stdout.strip() if cur_res.returncode == 0 else ''
+        pull_cmd = [git_cmd]
+        gh_token = os.environ.get('GITHUB_TOKEN', '').strip()
+        pull_env = os.environ.copy()
+        pull_env['GIT_TERMINAL_PROMPT'] = '0'
+        if gh_token:
+            import base64
+            basic = base64.b64encode(f'x-access-token:{gh_token}'.encode('utf-8')).decode('ascii')
+            pull_cmd += ['-c', f'http.https://github.com/.extraheader=AUTHORIZATION: basic {basic}']
+        pull_cmd += ['pull', rem, target_branch] if target_branch else ['pull', rem]
+        res = subprocess.run(pull_cmd, cwd=base, capture_output=True, text=True, timeout=60, env=pull_env)
+        combined = REDACTION.sub('[REDACTED]', (res.stdout + '\n' + res.stderr).strip())
+        if res.returncode != 0:
+            raise BridgeError(f'Git pull failed: {combined[:300]}', 422)
+        return {'success': True, 'remote': rem, 'branch': target_branch, 'output': combined[:1000]}
+
+    def git_discard(self, project: str, filepath: str = '', discard_all: bool = False) -> dict[str, Any]:
+        base = self._project(project)
+        git_cmd = shutil.which('git') or 'git'
+        if not (base / '.git').exists():
+            raise BridgeError('Not a git repository')
+        if discard_all:
+            res_reset = subprocess.run([git_cmd, 'reset', '--hard', 'HEAD'], cwd=base, capture_output=True, text=True, timeout=15)
+            if res_reset.returncode != 0:
+                raise BridgeError(f'Git reset failed: {res_reset.stderr.strip()}')
+            subprocess.run([git_cmd, 'clean', '-fd'], cwd=base, capture_output=True, text=True, timeout=15)
+            return {'success': True, 'discarded': 'all'}
+        rel = (filepath or '').strip()
+        if not rel:
+            raise BridgeError('File path required when discard_all is False')
+        target = self._file(project, rel)
+        st = subprocess.run([git_cmd, 'status', '--porcelain', '--', rel], cwd=base, capture_output=True, text=True, timeout=10)
+        status_line = st.stdout.strip()
+        if status_line.startswith('??'):
+            if target.is_file():
+                target.unlink(missing_ok=True)
+            elif target.is_dir():
+                shutil.rmtree(target, ignore_errors=True)
+            return {'success': True, 'discarded': rel, 'action': 'deleted_untracked'}
+        else:
+            res = subprocess.run([git_cmd, 'checkout', 'HEAD', '--', rel], cwd=base, capture_output=True, text=True, timeout=15)
+            if res.returncode != 0:
+                raise BridgeError(f'Git checkout failed: {res.stderr.strip() or res.stdout.strip()}')
+            return {'success': True, 'discarded': rel, 'action': 'reverted'}
+
+    def git_diff_file(self, project: str, filepath: str) -> dict[str, Any]:
+        base = self._project(project)
+        git_cmd = shutil.which('git') or 'git'
+        rel = (filepath or '').strip()
+        if not rel:
+            return self.git_diff(project)
+        target = self._file(project, rel)
+        try:
+            res = subprocess.run([git_cmd, 'diff', 'HEAD', '--', rel], cwd=base, capture_output=True, text=True, timeout=15)
+            clean_diff = REDACTION.sub('[REDACTED]', res.stdout.strip())[:32000]
+            if not clean_diff:
+                if target.is_file():
+                    try:
+                        content = target.read_text(encoding='utf-8', errors='replace')[:4000]
+                        lines = [f'+{line}' for line in content.splitlines()]
+                        clean_diff = f'--- /dev/null\n+++ b/{rel}\n@@ -0,0 +1,{len(lines)} @@\n' + '\n'.join(lines)
+                    except Exception:
+                        pass
+            return {'filepath': rel, 'diff': clean_diff, 'has_changes': bool(clean_diff)}
+        except Exception as e:
+            return {'filepath': rel, 'diff': '', 'has_changes': False, 'error': str(e)}
+
+    def git_ai_commit(self, project: str) -> dict[str, Any]:
+        base = self._project(project)
+        git_cmd = shutil.which('git') or 'git'
+        st = subprocess.run([git_cmd, 'status', '--porcelain'], cwd=base, capture_output=True, text=True, timeout=10)
+        lines = [l.strip() for l in st.stdout.splitlines() if l.strip()]
+        if not lines:
+            return {'message': 'chore: working tree clean (no changes)'}
+        changed_files = [l[3:].strip() for l in lines]
+        scopes = set()
+        for f in changed_files:
+            parts = f.replace('\\', '/').split('/')
+            if len(parts) > 1:
+                scopes.add(parts[0].lower())
+        scope_str = list(scopes)[0] if len(scopes) == 1 else ''
+        scope_part = f'({scope_str})' if scope_str else ''
+
+        diff_res = subprocess.run([git_cmd, 'diff', '--stat', 'HEAD'], cwd=base, capture_output=True, text=True, timeout=10)
+        stat = diff_res.stdout.strip().splitlines()[-1] if diff_res.stdout.strip() else f'{len(changed_files)} files changed'
+
+        if any(f.endswith(('README.md', 'docs', '.md')) for f in changed_files) and len(changed_files) == 1:
+            msg = f'docs{scope_part}: update documentation'
+        elif any('test' in f.lower() for f in changed_files):
+            msg = f'test{scope_part}: add and update test suites'
+        elif any('fix' in f.lower() or 'bug' in f.lower() for f in changed_files):
+            msg = f'fix{scope_part}: resolve issues in {", ".join([Path(f).name for f in changed_files[:2]])}'
+        elif any(f.endswith(('.kt', '.java', '.tsx', '.jsx', '.vue', '.html')) for f in changed_files):
+            msg = f'feat{scope_part}: update UI components and workspace features'
+        elif any(f.endswith(('.json', '.yaml', '.yml', '.toml', '.gradle')) for f in changed_files):
+            msg = f'chore{scope_part}: update project configurations and dependencies'
+        else:
+            first_name = Path(changed_files[0]).stem
+            msg = f'feat{scope_part}: update {first_name} and project modules'
+        return {'message': msg, 'files_count': len(changed_files), 'stat': stat}
 
     # ---- Phase 3: Workspace Global Search & Project Management ----
 

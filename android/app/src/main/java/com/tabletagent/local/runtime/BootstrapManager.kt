@@ -138,8 +138,11 @@ object BootstrapManager {
         File(rootfs, "dev").mkdirs()
         File(rootfs, "proc").mkdirs()
         File(rootfs, "sys").mkdirs()
+        File(rootfs, "system").mkdirs()
+        File(rootfs, "apex").mkdirs()
         File(rootfs, "root").apply { mkdirs(); setReadable(true, false); setWritable(true, false); setExecutable(true, false) }
         File(rootfs, "root/.local/bin").mkdirs()
+        File(rootfs, "root/models").mkdirs()
         File(rootfs, "root/tablet-agent/workspaces").mkdirs()
         File(rootfs, "opt/tablet-agent").mkdirs()
 

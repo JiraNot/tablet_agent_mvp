@@ -104,6 +104,16 @@ class LocalApi(private val deviceToken: String, port: Int = 8765) {
         request("POST", "/v1/projects/${encode(project)}/git/checkout", JSONObject().put("branch", branch).put("create", create))
     suspend fun gitPush(project: String, remote: String = "origin", branch: String = ""): JSONObject =
         request("POST", "/v1/projects/${encode(project)}/git/push", JSONObject().put("remote", remote).put("branch", branch))
+    suspend fun gitPull(project: String, remote: String = "origin", branch: String = ""): JSONObject =
+        request("POST", "/v1/projects/${encode(project)}/git/pull", JSONObject().put("remote", remote).put("branch", branch))
+    suspend fun gitLog(project: String, limit: Int = 50): JSONObject =
+        request("GET", "/v1/projects/${encode(project)}/git/log?limit=$limit")
+    suspend fun gitDiscard(project: String, path: String = "", all: Boolean = false): JSONObject =
+        request("POST", "/v1/projects/${encode(project)}/git/discard", JSONObject().put("path", path).put("all", all))
+    suspend fun gitFileDiff(project: String, path: String): JSONObject =
+        request("GET", "/v1/projects/${encode(project)}/git/file-diff?path=${encode(path)}")
+    suspend fun gitAiCommit(project: String): JSONObject =
+        request("POST", "/v1/projects/${encode(project)}/git/ai-commit", JSONObject())
     suspend fun gitCheckpoint(project: String, label: String = "apply-code"): JSONObject =
         request("POST", "/v1/projects/${encode(project)}/git/checkpoint", JSONObject().put("label", label))
 
@@ -131,4 +141,6 @@ class LocalApi(private val deviceToken: String, port: Int = 8765) {
     suspend fun slmStatus(): JSONObject = request("GET", "/v1/slm/status")
     suspend fun slmSetup(action: String = "check", model: String = "qwen2.5-coder-1.5b"): JSONObject =
         request("POST", "/v1/slm/setup", JSONObject().put("action", action).put("model", model))
+    suspend fun slmDownload(model: String = "qwen2.5-coder-1.5b"): JSONObject =
+        request("POST", "/v1/slm/download", JSONObject().put("model", model))
 }

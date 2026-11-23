@@ -56,7 +56,9 @@ object EmbeddedProcessRunner {
             "-0",
             "-b", "/dev",
             "-b", "/proc",
-            "-b", "/sys"
+            "-b", "/sys",
+            "-b", "/system",
+            "-b", "/apex"
         )
 
         for ((hostPath, guestPath) in customBinds) {

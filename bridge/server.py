@@ -66,6 +66,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200,self.core.slm_status())
         if seg==['v1','slm','setup'] and method=='POST':
             return self.reply(200,self.core.slm_setup(self._body()))
+        if seg==['v1','slm','download'] and method=='POST':
+            return self.reply(200,self.core.slm_download(self._body()))
         if seg==['v1','settings']:
             if method=='GET':return self.reply(200,self.core.get_settings())
             if method=='PUT':return self.reply(200,self.core.update_settings(self._body()))
@@ -149,6 +151,20 @@ class Handler(BaseHTTPRequestHandler):
                 if seg[4]=='checkpoint' and method=='POST':
                     obj=self._body()
                     return self.reply(200,self.core.git_checkpoint(name,str(obj.get('label','manual'))))
+                if seg[4]=='log' and method=='GET':
+                    lim=int(q.get('limit',['50'])[0])
+                    return self.reply(200,self.core.git_log(name,limit=lim))
+                if seg[4]=='pull' and method=='POST':
+                    obj=self._body()
+                    return self.reply(200,self.core.git_pull(name,str(obj.get('remote','origin')),str(obj.get('branch',''))))
+                if seg[4]=='discard' and method=='POST':
+                    obj=self._body()
+                    return self.reply(200,self.core.git_discard(name,str(obj.get('path','')),discard_all=bool(obj.get('all',False))))
+                if seg[4]=='file-diff' and method=='GET':
+                    rel=q.get('path',[''])[0]
+                    return self.reply(200,self.core.git_diff_file(name,rel))
+                if seg[4]=='ai-commit' and method=='POST':
+                    return self.reply(200,self.core.git_ai_commit(name))
             if len(seg)>=4 and seg[3]=='worktrees':
                 if len(seg)==4 and method=='GET':
                     return self.reply(200,{'worktrees':self.core.list_worktrees(name)})

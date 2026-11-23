@@ -134,6 +134,7 @@ fun TabletAgentApp() {
     }
     var createDialog by remember { mutableStateOf(false) }
     var gitReviewDialog by remember { mutableStateOf(false) }
+    var showSlmManagerDialog by remember { mutableStateOf(false) }
     var pickerExpanded by remember { mutableStateOf(false) }
     var prompt by rememberSaveable { mutableStateOf("") }
     var mode by rememberSaveable { mutableStateOf("plan") }
@@ -416,6 +417,7 @@ fun TabletAgentApp() {
                             if (nextView == 2) sidebarOpen = false
                         },
                         onOpenGit = { gitReviewDialog = true },
+                        onOpenSlm = { showSlmManagerDialog = true },
                         apks = detectedApks,
                         onInstallApk = launchInstallApk,
                         onExportProject = doExportProject,
@@ -962,6 +964,13 @@ fun TabletAgentApp() {
             project = selectedProject,
             memory = hermesMemoryData,
             onDismiss = { showHermesMemoryDialog = false }
+        )
+    }
+    if (showSlmManagerDialog) {
+        SlmManagerDialog(
+            api = api,
+            onDismiss = { showSlmManagerDialog = false },
+            notify = notify
         )
     }
 }
@@ -2304,18 +2313,26 @@ fun GitReviewDialog(
     notify: (Throwable) -> Unit
 ) {
     val scope = rememberCoroutineScope()
+    var selectedTab by remember { mutableStateOf(0) } // 0: Changes, 1: Branches & Sync, 2: History, 3: Worktrees
     var loading by remember { mutableStateOf(true) }
     var statusObj by remember { mutableStateOf<JSONObject?>(null) }
     var diffText by remember { mutableStateOf("") }
+    var selectedFileDiff by remember { mutableStateOf<String?>(null) }
     var commitMessage by remember { mutableStateOf("") }
     var committing by remember { mutableStateOf(false) }
+    var aiGenerating by remember { mutableStateOf(false) }
     var branches by remember { mutableStateOf<List<String>>(emptyList()) }
     var currentBranch by remember { mutableStateOf("") }
-    var branchMenuExpanded by remember { mutableStateOf(false) }
     var showNewBranchDialog by remember { mutableStateOf(false) }
     var newBranchName by remember { mutableStateOf("") }
     var showPushDialog by remember { mutableStateOf(false) }
     var pushing by remember { mutableStateOf(false) }
+    var pulling by remember { mutableStateOf(false) }
+    var pullResult by remember { mutableStateOf<String?>(null) }
+    var logCommits by remember { mutableStateOf<List<JSONObject>>(emptyList()) }
+    var worktrees by remember { mutableStateOf<List<JSONObject>>(emptyList()) }
+    var rollbackTargetSha by remember { mutableStateOf<String?>(null) }
+    var showDiscardAllConfirm by remember { mutableStateOf(false) }
 
     fun refresh() {
         loading = true
@@ -2324,11 +2341,16 @@ fun GitReviewDialog(
                 val st = api.gitStatus(project)
                 val df = api.gitDiff(project)
                 val br = api.gitBranches(project)
+                val lg = api.gitLog(project, 40)
+                val wt = api.listWorktrees(project)
                 statusObj = st
                 diffText = df.optString("diff", "")
                 currentBranch = br.optString("current", st.optString("branch", "HEAD"))
-                val arr = br.optJSONArray("branches")
-                if (arr != null) branches = (0 until arr.length()).map { arr.getString(it) }
+                val arrBr = br.optJSONArray("branches")
+                if (arrBr != null) branches = (0 until arrBr.length()).map { arrBr.getString(it) }
+                val arrLg = lg.optJSONArray("commits")
+                if (arrLg != null) logCommits = (0 until arrLg.length()).map { arrLg.getJSONObject(it) }
+                worktrees = (0 until wt.length()).map { wt.getJSONObject(it) }
             } catch (e: Exception) {
                 notify(e)
             } finally {
@@ -2343,146 +2365,513 @@ fun GitReviewDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
+        modifier = Modifier.fillMaxWidth(0.92f).fillMaxHeight(0.88f),
         title = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.History, null, Modifier.size(22.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Git Review & Commit", style = MaterialTheme.typography.titleMedium)
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.History, null, Modifier.size(24.dp), tint = Color(0xFF3B82F6))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Git Control Center", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.width(8.dp))
+                    Surface(
+                        color = Color(0xFF1E3A8A),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text(
+                            currentBranch.ifBlank { "HEAD" },
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFFDBEAFE)
+                        )
+                    }
+                    Spacer(Modifier.weight(1f))
+                    IconButton(onClick = { refresh() }, modifier = Modifier.size(32.dp)) {
+                        Icon(Icons.Default.Refresh, contentDescription = "Refresh", modifier = Modifier.size(18.dp))
+                    }
+                }
+
+                TabRow(
+                    selectedTabIndex = selectedTab,
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                    contentColor = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.clip(RoundedCornerShape(8.dp))
+                ) {
+                    val clean = statusObj?.optBoolean("clean", true) ?: true
+                    val uncommittedCount = statusObj?.optInt("uncommitted_count", 0) ?: 0
+                    Tab(
+                        selected = selectedTab == 0,
+                        onClick = { selectedTab = 0 },
+                        text = {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Icon(Icons.Default.EditNote, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Text("Changes", fontSize = 12.sp, fontWeight = if (selectedTab == 0) FontWeight.Bold else FontWeight.Normal)
+                                if (!clean && uncommittedCount > 0) {
+                                    Badge(containerColor = Color(0xFFF59E0B), contentColor = Color.Black) { Text("$uncommittedCount") }
+                                }
+                            }
+                        }
+                    )
+                    Tab(
+                        selected = selectedTab == 1,
+                        onClick = { selectedTab = 1 },
+                        text = {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Icon(Icons.Default.CallSplit, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Text("Branches & Sync", fontSize = 12.sp, fontWeight = if (selectedTab == 1) FontWeight.Bold else FontWeight.Normal)
+                            }
+                        }
+                    )
+                    Tab(
+                        selected = selectedTab == 2,
+                        onClick = { selectedTab = 2 },
+                        text = {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Icon(Icons.Default.History, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Text("History (${logCommits.size})", fontSize = 12.sp, fontWeight = if (selectedTab == 2) FontWeight.Bold else FontWeight.Normal)
+                            }
+                        }
+                    )
+                    Tab(
+                        selected = selectedTab == 3,
+                        onClick = { selectedTab = 3 },
+                        text = {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Icon(Icons.Default.AccountTree, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Text("Worktrees (${worktrees.size})", fontSize = 12.sp, fontWeight = if (selectedTab == 3) FontWeight.Bold else FontWeight.Normal)
+                            }
+                        }
+                    )
+                }
             }
         },
         text = {
             if (loading) {
-                Box(Modifier.fillMaxWidth().height(160.dp), contentAlignment = Alignment.Center) {
+                Box(Modifier.fillMaxWidth().height(240.dp), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator()
                 }
             } else {
                 val clean = statusObj?.optBoolean("clean", true) ?: true
-                val branch = statusObj?.optString("branch", "HEAD") ?: "HEAD"
-                val uncommittedCount = statusObj?.optInt("uncommitted_count", 0) ?: 0
+                val filesArr = statusObj?.optJSONArray("files")
+                val filesList = if (filesArr != null) (0 until filesArr.length()).map { filesArr.getJSONObject(it) } else emptyList()
 
-                Column(
-                    modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Surface(
-                        color = MaterialTheme.colorScheme.surfaceVariant,
-                        shape = MaterialTheme.shapes.small,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Box {
+                Box(Modifier.fillMaxSize()) {
+                    when (selectedTab) {
+                        0 -> {
+                            // --- TAB 0: Changes & Staging ---
+                            Column(
+                                modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                // Action Bar
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
                                     FilledTonalButton(
-                                        onClick = { branchMenuExpanded = true },
-                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                        modifier = Modifier.height(28.dp)
+                                        onClick = {
+                                            aiGenerating = true
+                                            scope.launch {
+                                                try {
+                                                    val res = api.gitAiCommit(project)
+                                                    commitMessage = res.optString("message", "feat: update project files")
+                                                } catch (e: Exception) {
+                                                    notify(e)
+                                                } finally {
+                                                    aiGenerating = false
+                                                }
+                                            }
+                                        },
+                                        enabled = !aiGenerating && !clean,
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                        modifier = Modifier.height(32.dp)
                                     ) {
-                                        Icon(Icons.Default.CallSplit, null, Modifier.size(13.dp))
+                                        Icon(Icons.Default.AutoAwesome, null, Modifier.size(14.dp), tint = Color(0xFFA855F7))
                                         Spacer(Modifier.width(4.dp))
-                                        Text(currentBranch.ifBlank { branch }, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                                        Text(if (aiGenerating) "Generating…" else "✨ AI Auto-Commit Msg", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                                     }
-                                    DropdownMenu(expanded = branchMenuExpanded, onDismissRequest = { branchMenuExpanded = false }) {
-                                        branches.forEach { bName ->
-                                            DropdownMenuItem(
-                                                text = { Text(bName, fontSize = 12.sp) },
-                                                onClick = {
-                                                    branchMenuExpanded = false
-                                                    scope.launch {
-                                                        runCatching { api.gitCheckout(project, bName) }
-                                                            .onSuccess { refresh() }
-                                                            .onFailure { notify(it) }
+
+                                    if (!clean) {
+                                        OutlinedButton(
+                                            onClick = { showDiscardAllConfirm = true },
+                                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFEF4444)),
+                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                            modifier = Modifier.height(32.dp)
+                                        ) {
+                                            Icon(Icons.Default.DeleteSweep, null, Modifier.size(14.dp))
+                                            Spacer(Modifier.width(4.dp))
+                                            Text("Discard All", fontSize = 11.sp)
+                                        }
+                                    }
+                                }
+
+                                if (filesList.isNotEmpty()) {
+                                    Text("Modified Files (${filesList.size}):", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        filesList.forEach { fObj ->
+                                            val st = fObj.optString("status", "M")
+                                            val fName = fObj.optString("file", "")
+                                            Surface(
+                                                color = if (selectedFileDiff == fName) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f) else MaterialTheme.colorScheme.surfaceVariant,
+                                                shape = RoundedCornerShape(6.dp),
+                                                modifier = Modifier.fillMaxWidth().clickable {
+                                                    if (selectedFileDiff == fName) {
+                                                        selectedFileDiff = null
+                                                    } else {
+                                                        selectedFileDiff = fName
+                                                        scope.launch {
+                                                            try {
+                                                                val fDiff = api.gitFileDiff(project, fName)
+                                                                diffText = fDiff.optString("diff", "")
+                                                            } catch (e: Exception) {
+                                                                notify(e)
+                                                            }
+                                                        }
                                                     }
                                                 }
+                                            ) {
+                                                Row(
+                                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    val badgeColor = when {
+                                                        st.contains("M") -> Color(0xFFF59E0B)
+                                                        st.contains("A") || st.contains("?") -> Color(0xFF10B981)
+                                                        st.contains("D") -> Color(0xFFEF4444)
+                                                        else -> Color(0xFF6B7280)
+                                                    }
+                                                    Surface(color = badgeColor.copy(alpha = 0.2f), shape = RoundedCornerShape(4.dp)) {
+                                                        Text(st.trim().ifBlank { "?" }, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp), color = badgeColor, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                                    }
+                                                    Spacer(Modifier.width(8.dp))
+                                                    Text(fName, fontSize = 12.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.weight(1f))
+                                                    IconButton(
+                                                        onClick = {
+                                                            scope.launch {
+                                                                try {
+                                                                    api.gitDiscard(project, fName)
+                                                                    refresh()
+                                                                } catch (e: Exception) {
+                                                                    notify(e)
+                                                                }
+                                                            }
+                                                        },
+                                                        modifier = Modifier.size(24.dp)
+                                                    ) {
+                                                        Icon(Icons.Default.Close, contentDescription = "Discard file", modifier = Modifier.size(14.dp), tint = Color(0xFFEF4444))
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Text(
+                                    if (selectedFileDiff != null) "Diff for $selectedFileDiff:" else "Unified Project Diff:",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold
+                                )
+
+                                Surface(
+                                    color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier.fillMaxWidth().heightIn(min = 140.dp, max = 260.dp)
+                                ) {
+                                    val lines = diffText.ifBlank { "No changes detected in working tree." }.split("\n")
+                                    Column(modifier = Modifier.padding(8.dp).verticalScroll(rememberScrollState())) {
+                                        lines.forEach { line ->
+                                            val lineColor = when {
+                                                line.startsWith("+") && !line.startsWith("+++") -> Color(0xFF22C55E)
+                                                line.startsWith("-") && !line.startsWith("---") -> Color(0xFFEF4444)
+                                                line.startsWith("@@") -> Color(0xFF06B6D4)
+                                                else -> MaterialTheme.colorScheme.onSurface
+                                            }
+                                            Text(
+                                                text = line,
+                                                color = lineColor,
+                                                fontSize = 11.sp,
+                                                fontFamily = FontFamily.Monospace,
+                                                lineHeight = 15.sp
                                             )
                                         }
                                     }
                                 }
-                                Spacer(Modifier.width(4.dp))
-                                IconButton(
-                                    onClick = { showNewBranchDialog = true },
-                                    modifier = Modifier.size(28.dp)
-                                ) {
-                                    Icon(Icons.Default.Add, contentDescription = "New Branch", modifier = Modifier.size(14.dp))
-                                }
-                                Spacer(Modifier.weight(1f))
-                                FilledTonalButton(
-                                    onClick = { showPushDialog = true },
-                                    colors = ButtonDefaults.filledTonalButtonColors(containerColor = Color(0xFF1E3A8A), contentColor = Color(0xFFDBEAFE)),
-                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                    modifier = Modifier.height(28.dp)
-                                ) {
-                                    Icon(Icons.Default.CloudUpload, contentDescription = "Push", modifier = Modifier.size(13.dp))
-                                    Spacer(Modifier.width(4.dp))
-                                    Text("Push", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+
+                                if (!clean) {
+                                    OutlinedTextField(
+                                        value = commitMessage,
+                                        onValueChange = { commitMessage = it },
+                                        label = { Text("Commit message (Conventional Commits)") },
+                                        placeholder = { Text("feat: describe verified changes") },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        maxLines = 3
+                                    )
                                 }
                             }
-                            Row(verticalAlignment = Alignment.CenterVertically) {
+                        }
+
+                        1 -> {
+                            // --- TAB 1: Branches & Remote Sync ---
+                            Column(
+                                modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+                                verticalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                // Active Branch & Sync Card
+                                Card(
+                                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(Icons.Default.CallSplit, null, tint = Color(0xFF3B82F6), modifier = Modifier.size(20.dp))
+                                            Spacer(Modifier.width(8.dp))
+                                            Column {
+                                                Text("Current Branch: $currentBranch", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                                Text("Remote tracking: origin/$currentBranch", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                            }
+                                        }
+
+                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            FilledTonalButton(
+                                                onClick = {
+                                                    pulling = true
+                                                    scope.launch {
+                                                        try {
+                                                            val res = api.gitPull(project, "origin", currentBranch)
+                                                            pullResult = res.optString("output", "Pull complete")
+                                                            refresh()
+                                                        } catch (e: Exception) {
+                                                            notify(e)
+                                                        } finally {
+                                                            pulling = false
+                                                        }
+                                                    }
+                                                },
+                                                enabled = !pulling,
+                                                modifier = Modifier.weight(1f)
+                                            ) {
+                                                Icon(Icons.Default.CloudDownload, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                Spacer(Modifier.width(6.dp))
+                                                Text(if (pulling) "Pulling…" else "↓ Pull Remote")
+                                            }
+
+                                            Button(
+                                                onClick = { showPushDialog = true },
+                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB)),
+                                                modifier = Modifier.weight(1f)
+                                            ) {
+                                                Icon(Icons.Default.CloudUpload, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                Spacer(Modifier.width(6.dp))
+                                                Text("↑ Push Remote")
+                                            }
+                                        }
+
+                                        if (pullResult != null) {
+                                            Surface(color = Color(0xFF064E3B), shape = RoundedCornerShape(6.dp), modifier = Modifier.fillMaxWidth()) {
+                                                Text(pullResult!!, color = Color(0xFF6EE7B7), fontSize = 11.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.padding(8.dp))
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Branch Switcher Section
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("Local Branches (${branches.size}):", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleSmall)
+                                    Spacer(Modifier.weight(1f))
+                                    Button(
+                                        onClick = { showNewBranchDialog = true },
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                        modifier = Modifier.height(30.dp)
+                                    ) {
+                                        Icon(Icons.Default.Add, null, Modifier.size(14.dp))
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("New Branch", fontSize = 11.sp)
+                                    }
+                                }
+
+                                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    branches.forEach { bName ->
+                                        val isCurrent = bName == currentBranch
+                                        Surface(
+                                            color = if (isCurrent) Color(0xFF1E3A8A).copy(alpha = 0.4f) else MaterialTheme.colorScheme.surfaceVariant,
+                                            shape = RoundedCornerShape(8.dp),
+                                            border = if (isCurrent) BorderStroke(1.dp, Color(0xFF3B82F6)) else null,
+                                            modifier = Modifier.fillMaxWidth()
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Icon(
+                                                    if (isCurrent) Icons.Default.CheckCircle else Icons.Default.CallSplit,
+                                                    null,
+                                                    tint = if (isCurrent) Color(0xFF3B82F6) else MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                                Spacer(Modifier.width(8.dp))
+                                                Text(bName, fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                                                if (!isCurrent) {
+                                                    FilledTonalButton(
+                                                        onClick = {
+                                                            scope.launch {
+                                                                runCatching { api.gitCheckout(project, bName) }
+                                                                    .onSuccess { refresh() }
+                                                                    .onFailure { notify(it) }
+                                                            }
+                                                        },
+                                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                                        modifier = Modifier.height(28.dp)
+                                                    ) {
+                                                        Text("Switch", fontSize = 11.sp)
+                                                    }
+                                                } else {
+                                                    Surface(color = Color(0xFF1D4ED8), shape = RoundedCornerShape(4.dp)) {
+                                                        Text("Active", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        2 -> {
+                            // --- TAB 2: Commit History Timeline ---
+                            Column(
+                                modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                if (logCommits.isEmpty()) {
+                                    Text("No commit history available.", style = MaterialTheme.typography.bodyMedium)
+                                } else {
+                                    logCommits.forEach { cObj ->
+                                        val hash = cObj.optString("hash", "")
+                                        val author = cObj.optString("author", "")
+                                        val relTime = cObj.optString("relative_time", "")
+                                        val msg = cObj.optString("message", "")
+
+                                        Surface(
+                                            color = MaterialTheme.colorScheme.surfaceVariant,
+                                            shape = RoundedCornerShape(8.dp),
+                                            modifier = Modifier.fillMaxWidth()
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.padding(10.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                                        Surface(color = Color(0xFF374151), shape = RoundedCornerShape(4.dp)) {
+                                                            Text(hash, color = Color(0xFF93C5FD), fontSize = 11.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp))
+                                                        }
+                                                        Text(author, fontSize = 11.sp, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                                        Text("• $relTime", fontSize = 10.sp, color = MaterialTheme.colorScheme.outline)
+                                                    }
+                                                    Text(msg, fontSize = 12.sp, fontWeight = FontWeight.Normal)
+                                                }
+
+                                                OutlinedButton(
+                                                    onClick = { rollbackTargetSha = hash },
+                                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFF59E0B)),
+                                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                                    modifier = Modifier.height(28.dp)
+                                                ) {
+                                                    Icon(Icons.Default.Undo, null, Modifier.size(13.dp))
+                                                    Spacer(Modifier.width(3.dp))
+                                                    Text("Rollback", fontSize = 10.sp)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        3 -> {
+                            // --- TAB 3: Agent Worktrees (Parallel Workspaces) ---
+                            Column(
+                                modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("Multi-Agent Parallel Worktrees:", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleSmall)
+                                    Spacer(Modifier.weight(1f))
+                                    FilledTonalButton(
+                                        onClick = {
+                                            scope.launch {
+                                                try {
+                                                    api.pruneWorktrees(project)
+                                                    refresh()
+                                                } catch (e: Exception) {
+                                                    notify(e)
+                                                }
+                                            }
+                                        },
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                        modifier = Modifier.height(28.dp)
+                                    ) {
+                                        Text("Prune Stale", fontSize = 11.sp)
+                                    }
+                                }
+
                                 Text(
-                                    if (clean) "Clean working tree" else "$uncommittedCount uncommitted changes",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = if (clean) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.tertiary
+                                    "Worktrees allow multiple AI agents to work on isolated git branches simultaneously without stepping on each other's files.",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
+
+                                if (worktrees.isEmpty()) {
+                                    Text("No worktrees created. Tasks currently run in base project.", style = MaterialTheme.typography.bodySmall)
+                                } else {
+                                    worktrees.forEach { wtObj ->
+                                        val path = wtObj.optString("path", "")
+                                        val br = wtObj.optString("branch", "")
+                                        val isBase = wtObj.optBoolean("is_base", false)
+
+                                        Surface(
+                                            color = if (isBase) MaterialTheme.colorScheme.surfaceVariant else Color(0xFF1E293B),
+                                            shape = RoundedCornerShape(8.dp),
+                                            modifier = Modifier.fillMaxWidth()
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.padding(10.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Icon(if (isBase) Icons.Default.Folder else Icons.Default.AccountTree, null, tint = if (isBase) Color(0xFF3B82F6) else Color(0xFF10B981), modifier = Modifier.size(18.dp))
+                                                Spacer(Modifier.width(8.dp))
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                                        Text(if (isBase) "Base Workspace" else "Agent Worktree: $br", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                                        if (isBase) {
+                                                            Surface(color = Color(0xFF2563EB).copy(alpha = 0.2f), shape = RoundedCornerShape(4.dp)) {
+                                                                Text("PRIMARY", color = Color(0xFF60A5FA), fontSize = 9.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp))
+                                                            }
+                                                        }
+                                                    }
+                                                    Text(path, fontSize = 10.sp, color = MaterialTheme.colorScheme.outline, maxLines = 1)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
-                    }
-
-                    if (!clean) {
-                        Text("Unified Diff:", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
-                        Surface(
-                            color = MaterialTheme.colorScheme.surfaceContainerHighest,
-                            shape = MaterialTheme.shapes.small,
-                            modifier = Modifier.fillMaxWidth().heightIn(max = 240.dp)
-                        ) {
-                            Text(
-                                text = diffText.ifBlank { "No text diff available (binary or untracked files)" },
-                                style = MaterialTheme.typography.bodySmall.copy(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace),
-                                modifier = Modifier.padding(8.dp).verticalScroll(rememberScrollState())
-                            )
-                        }
-
-                        OutlinedTextField(
-                            value = commitMessage,
-                            onValueChange = { commitMessage = it },
-                            label = { Text("Commit message") },
-                            placeholder = { Text("feat: describe verified changes") },
-                            modifier = Modifier.fillMaxWidth(),
-                            maxLines = 3
-                        )
-
-                        Text(
-                            "Safety policy: Autonomous git pushes are prohibited. Commits are strictly local to this device.",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.outline
-                        )
-                    } else {
-                        Text("Working directory is clean. No uncommitted changes.", style = MaterialTheme.typography.bodyMedium)
                     }
                 }
             }
         },
         confirmButton = {
-            val isClean = statusObj?.optBoolean("clean", true) ?: true
-            if (!isClean) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(
-                        onClick = {
-                            committing = true
-                            scope.launch {
-                                try {
-                                    api.gitRollback(project)
-                                    refresh()
-                                    notify(Throwable("Rolled back uncommitted changes to HEAD checkpoint"))
-                                } catch (e: Exception) {
-                                    notify(e)
-                                } finally {
-                                    committing = false
-                                }
-                            }
-                        },
-                        enabled = !committing
-                    ) {
-                        Text("Rollback to HEAD")
-                    }
+            if (selectedTab == 0) {
+                val isClean = statusObj?.optBoolean("clean", true) ?: true
+                if (!isClean) {
                     Button(
                         onClick = {
                             committing = true
@@ -2500,7 +2889,7 @@ fun GitReviewDialog(
                         },
                         enabled = !committing && commitMessage.isNotBlank()
                     ) {
-                        Text(if (committing) "Committing…" else "Commit changes")
+                        Text(if (committing) "Committing…" else "Commit Changes")
                     }
                 }
             }
@@ -2509,6 +2898,62 @@ fun GitReviewDialog(
             TextButton(onClick = onDismiss) { Text("Close") }
         }
     )
+
+    if (showDiscardAllConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDiscardAllConfirm = false },
+            title = { Text("Discard All Changes?") },
+            text = { Text("This will revert all modified files and remove untracked files in the working directory. This action cannot be undone.") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showDiscardAllConfirm = false
+                        scope.launch {
+                            try {
+                                api.gitDiscard(project, all = true)
+                                refresh()
+                            } catch (e: Exception) {
+                                notify(e)
+                            }
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF4444))
+                ) { Text("Discard Everything") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDiscardAllConfirm = false }) { Text("Cancel") }
+            }
+        )
+    }
+
+    if (rollbackTargetSha != null) {
+        val targetSha = rollbackTargetSha!!
+        AlertDialog(
+            onDismissRequest = { rollbackTargetSha = null },
+            title = { Text("Rollback to Commit $targetSha?") },
+            text = { Text("This will hard-reset your working tree and branch HEAD to commit $targetSha. Uncommitted changes will be discarded.") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        rollbackTargetSha = null
+                        scope.launch {
+                            try {
+                                api.gitRollback(project, targetSha)
+                                refresh()
+                                notify(Throwable("Rolled back successfully to $targetSha"))
+                            } catch (e: Exception) {
+                                notify(e)
+                            }
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFF59E0B))
+                ) { Text("Confirm Rollback") }
+            },
+            dismissButton = {
+                TextButton(onClick = { rollbackTargetSha = null }) { Text("Cancel") }
+            }
+        )
+    }
 
     if (showNewBranchDialog) {
         AlertDialog(
@@ -2591,3 +3036,250 @@ fun GitReviewDialog(
         )
     }
 }
+
+@Composable
+fun SlmManagerDialog(
+    api: LocalApi,
+    onDismiss: () -> Unit,
+    notify: (Throwable) -> Unit
+) {
+    val scope = rememberCoroutineScope()
+    var slmData by remember { mutableStateOf<JSONObject?>(null) }
+    var loading by remember { mutableStateOf(true) }
+    var downloadingKey by remember { mutableStateOf<String?>(null) }
+    var testPrompt by remember { mutableStateOf("Write a Kotlin function to reverse a string") }
+    var testResult by remember { mutableStateOf<String?>(null) }
+    var runningTest by remember { mutableStateOf(false) }
+
+    suspend fun refresh() {
+        try {
+            val res = api.slmStatus()
+            slmData = res
+            val dlProgress = res.optJSONObject("download_progress")
+            if (dlProgress != null && dlProgress.optString("status") == "downloading") {
+                downloadingKey = dlProgress.optString("model")
+            } else if (dlProgress != null && (dlProgress.optString("status") == "completed" || dlProgress.optString("status") == "failed")) {
+                downloadingKey = null
+            }
+        } catch (e: Exception) {
+            notify(e)
+        } finally {
+            loading = false
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        refresh()
+        while (isActive) {
+            delay(1500)
+            if (downloadingKey != null) {
+                runCatching { refresh() }
+            }
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        modifier = Modifier.fillMaxWidth(0.92f).fillMaxHeight(0.85f),
+        title = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Icon(Icons.Default.Memory, contentDescription = null, tint = Color(0xFF10B981))
+                    Text("Offline Local AI (llama.cpp ARM64)", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                }
+                val isInstalled = slmData?.optBoolean("installed", false) ?: false
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = if (isInstalled) Color(0xFF10B981).copy(alpha = 0.15f) else Color(0xFFEF4444).copy(alpha = 0.15f)
+                ) {
+                    Text(
+                        text = if (isInstalled) "● Engine Ready" else "● Engine Missing",
+                        color = if (isInstalled) Color(0xFF10B981) else Color(0xFFEF4444),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                }
+            }
+        },
+        text = {
+            if (loading && slmData == null) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(modifier = Modifier.size(32.dp))
+                }
+            } else {
+                val data = slmData
+                val installedModels = (0 until (data?.optJSONArray("models")?.length() ?: 0)).map {
+                    data!!.getJSONArray("models").getString(it)
+                }
+                val availableList = data?.optJSONArray("available_to_download")?.objects() ?: emptyList()
+                val dlProgress = data?.optJSONObject("download_progress")
+
+                Column(
+                    modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text("100% Offline Device Intelligence", fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
+                            Text(
+                                "Runs locally on this tablet via llama.cpp ARM64 with glibc-compat in PRoot. Zero internet needed for inference, zero API fees, complete privacy.",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    Text("Available GGUF Models (Qwen 2.5 Coder):", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+
+                    availableList.forEach { item ->
+                        val key = item.optString("key")
+                        val name = item.optString("name")
+                        val size = item.optString("size")
+                        val speed = item.optString("speed")
+                        val isDownloaded = installedModels.any { it.contains(key.replace("qwen2.5-coder-", "")) || it.contains(key) }
+                        val isCurrentDownloading = downloadingKey == key
+
+                        Card(
+                            shape = RoundedCornerShape(10.dp),
+                            border = BorderStroke(1.dp, if (isDownloaded) Color(0xFF10B981).copy(alpha = 0.5f) else MaterialTheme.colorScheme.outlineVariant),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(name, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                        Text("Size: $size • Speed: $speed", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                    if (isDownloaded) {
+                                        Surface(
+                                            shape = RoundedCornerShape(6.dp),
+                                            color = Color(0xFF10B981).copy(alpha = 0.15f)
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                            ) {
+                                                Icon(Icons.Default.CheckCircle, contentDescription = null, tint = Color(0xFF10B981), modifier = Modifier.size(14.dp))
+                                                Text("Downloaded", color = Color(0xFF10B981), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                            }
+                                        }
+                                    } else {
+                                        Button(
+                                            onClick = {
+                                                downloadingKey = key
+                                                scope.launch {
+                                                    runCatching { api.slmDownload(key) }
+                                                        .onFailure { notify(it); downloadingKey = null }
+                                                }
+                                            },
+                                            enabled = downloadingKey == null,
+                                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB))
+                                        ) {
+                                            Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(14.dp))
+                                            Spacer(Modifier.width(4.dp))
+                                            Text(if (isCurrentDownloading) "Downloading…" else "Download", fontSize = 11.sp)
+                                        }
+                                    }
+                                }
+
+                                if (isCurrentDownloading && dlProgress != null) {
+                                    val pct = dlProgress.optInt("percent", 0)
+                                    val dlMb = dlProgress.optDouble("downloaded_mb", 0.0)
+                                    val totalMb = dlProgress.optDouble("total_mb", 0.0)
+                                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        LinearProgressIndicator(
+                                            progress = { (pct / 100f).coerceIn(0f, 1f) },
+                                            modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
+                                            color = Color(0xFF2563EB)
+                                        )
+                                        Text(
+                                            "$pct% ($dlMb / $totalMb MB)",
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(Modifier.height(4.dp))
+                    Text("Instant On-Device Test:", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    OutlinedTextField(
+                        value = testPrompt,
+                        onValueChange = { testPrompt = it },
+                        label = { Text("Prompt for Local SLM") },
+                        modifier = Modifier.fillMaxWidth(),
+                        maxLines = 3
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        Button(
+                            onClick = {
+                                runningTest = true
+                                testResult = null
+                                scope.launch {
+                                    try {
+                                        val p = testPrompt.trim()
+                                        val res = api.startTask("tablet_agent_mvp", p, "plan", agent = "slm")
+                                        val taskId = res.optString("id")
+                                        testResult = "Task started: $taskId. Model running locally on tablet CPU!"
+                                    } catch (e: Exception) {
+                                        testResult = "Error: ${e.message}"
+                                    } finally {
+                                        runningTest = false
+                                    }
+                                }
+                            },
+                            enabled = !runningTest && installedModels.isNotEmpty(),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))
+                        ) {
+                            if (runningTest) {
+                                CircularProgressIndicator(modifier = Modifier.size(14.dp), color = Color.White)
+                                Spacer(Modifier.width(6.dp))
+                            }
+                            Text(if (installedModels.isEmpty()) "Download a model first" else "Run Test Inference")
+                        }
+                    }
+
+                    if (testResult != null) {
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = testResult ?: "",
+                                modifier = Modifier.padding(10.dp),
+                                fontSize = 12.sp,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = onDismiss) { Text("Close") }
+        }
+    )
+}
+
