@@ -104,10 +104,10 @@ class LocalApi(private val deviceToken: String, port: Int = 8765) {
         request("POST", "/v1/projects/${encode(project)}/git/checkout", JSONObject().put("branch", branch).put("create", create))
     suspend fun gitPush(project: String, remote: String = "origin", branch: String = ""): JSONObject =
         request("POST", "/v1/projects/${encode(project)}/git/push", JSONObject().put("remote", remote).put("branch", branch))
-    suspend fun gitCreateAndPush(project: String, repoName: String = "", isPrivate: Boolean = true, description: String = ""): JSONObject =
-        request("POST", "/v1/projects/${encode(project)}/git/create-and-push", JSONObject().put("repo_name", repoName).put("private", isPrivate).put("description", description))
-    suspend fun gitPull(project: String, remote: String = "origin", branch: String = ""): JSONObject =
-        request("POST", "/v1/projects/${encode(project)}/git/pull", JSONObject().put("remote", remote).put("branch", branch))
+    suspend fun gitCreateAndPush(project: String, repoName: String = "", isPrivate: Boolean = true, description: String = "", token: String = ""): JSONObject =
+        request("POST", "/v1/projects/${encode(project)}/git/create-and-push", JSONObject().put("repo_name", repoName).put("private", isPrivate).put("description", description).put("token", token))
+    suspend fun gitPull(project: String, remote: String = "origin", branch: String = "", token: String = ""): JSONObject =
+        request("POST", "/v1/projects/${encode(project)}/git/pull", JSONObject().put("remote", remote).put("branch", branch).put("token", token))
     suspend fun gitLog(project: String, limit: Int = 50): JSONObject =
         request("GET", "/v1/projects/${encode(project)}/git/log?limit=$limit")
     suspend fun gitDiscard(project: String, path: String = "", all: Boolean = false): JSONObject =
@@ -118,6 +118,12 @@ class LocalApi(private val deviceToken: String, port: Int = 8765) {
         request("POST", "/v1/projects/${encode(project)}/git/ai-commit", JSONObject())
     suspend fun gitCheckpoint(project: String, label: String = "apply-code"): JSONObject =
         request("POST", "/v1/projects/${encode(project)}/git/checkpoint", JSONObject().put("label", label))
+    suspend fun gitDraftPr(project: String, base: String = "main"): JSONObject =
+        request("POST", "/v1/projects/${encode(project)}/git/draft-pr", JSONObject().put("base", base))
+    suspend fun gitCreatePr(project: String, title: String, body: String, head: String, base: String = "main", token: String = ""): JSONObject =
+        request("POST", "/v1/projects/${encode(project)}/git/create-pr", JSONObject().put("title", title).put("body", body).put("head", head).put("base", base).put("token", token))
+    suspend fun gitResolveConflicts(project: String): JSONObject =
+        request("POST", "/v1/projects/${encode(project)}/git/resolve-conflicts", JSONObject())
 
     suspend fun terminalStart(project: String, cols: Int = 80, rows: Int = 24): JSONObject =
         request("POST", "/v1/projects/${encode(project)}/terminal/start", JSONObject().put("cols", cols).put("rows", rows))

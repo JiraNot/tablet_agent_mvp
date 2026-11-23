@@ -150,7 +150,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply(200,self.core.git_push(name,str(obj.get('remote','origin')),str(obj.get('branch',''))))
                 if seg[4]=='create-and-push' and method=='POST':
                     obj=self._body()
-                    return self.reply(200,self.core.git_create_and_push(name,repo_name=str(obj.get('repo_name','')),is_private=bool(obj.get('private',True)),description=str(obj.get('description',''))))
+                    return self.reply(200,self.core.git_create_and_push(name,repo_name=str(obj.get('repo_name','')),is_private=bool(obj.get('private',True)),description=str(obj.get('description','')),token=str(obj.get('token',''))))
                 if seg[4]=='checkpoint' and method=='POST':
                     obj=self._body()
                     return self.reply(200,self.core.git_checkpoint(name,str(obj.get('label','manual'))))
@@ -159,7 +159,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply(200,self.core.git_log(name,limit=lim))
                 if seg[4]=='pull' and method=='POST':
                     obj=self._body()
-                    return self.reply(200,self.core.git_pull(name,str(obj.get('remote','origin')),str(obj.get('branch',''))))
+                    return self.reply(200,self.core.git_pull(name,str(obj.get('remote','origin')),str(obj.get('branch','')),token=str(obj.get('token',''))))
                 if seg[4]=='discard' and method=='POST':
                     obj=self._body()
                     return self.reply(200,self.core.git_discard(name,str(obj.get('path','')),discard_all=bool(obj.get('all',False))))
@@ -168,6 +168,14 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply(200,self.core.git_diff_file(name,rel))
                 if seg[4]=='ai-commit' and method=='POST':
                     return self.reply(200,self.core.git_ai_commit(name))
+                if seg[4]=='draft-pr' and method=='POST':
+                    obj=self._body()
+                    return self.reply(200,self.core.git_draft_pr(name,base_branch=str(obj.get('base','main'))))
+                if seg[4]=='create-pr' and method=='POST':
+                    obj=self._body()
+                    return self.reply(200,self.core.git_create_pr(name,title=str(obj.get('title','')),body=str(obj.get('body','')),head=str(obj.get('head','')),base=str(obj.get('base','main')),token=str(obj.get('token',''))))
+                if seg[4]=='resolve-conflicts' and method=='POST':
+                    return self.reply(200,self.core.git_resolve_conflicts(name))
             if len(seg)>=4 and seg[3]=='worktrees':
                 if len(seg)==4 and method=='GET':
                     return self.reply(200,{'worktrees':self.core.list_worktrees(name)})

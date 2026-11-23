@@ -1,6 +1,8 @@
 package com.tabletagent.local
 
 import android.annotation.SuppressLint
+import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -54,7 +56,9 @@ import com.tabletagent.local.ui.AionClaudeAgentPane
 import com.tabletagent.local.ui.AionClaudeSidebar
 import com.tabletagent.local.ui.ClaudeCodeTopBar
 import com.tabletagent.local.ui.CliOAuthDialog
+import com.tabletagent.local.ui.CodeEditorWithLineNumbers
 import com.tabletagent.local.ui.GitHubUnifiedAccountCard
+import com.tabletagent.local.ui.HapticFeedbackHelper
 import com.tabletagent.local.ui.HermesMemoryDialog
 import com.tabletagent.local.ui.InteractivePtyTerminal
 import com.tabletagent.local.ui.OfficialCliCard
@@ -259,6 +263,9 @@ fun TabletAgentApp() {
     var lastTasksRaw by remember { mutableStateOf("") }
     var lastProjectsRaw by remember { mutableStateOf("") }
     var lastApprovalsRaw by remember { mutableStateOf("") }
+    val activeRunningTasks = remember { mutableSetOf<String>() }
+    val notifiedCompletedTasks = remember { mutableSetOf<String>() }
+    val notifiedApprovalIds = remember { mutableSetOf<String>() }
     LaunchedEffect(token, bridgePort, selectedProject, selectedTask) {
         pollTick = 0
         lastTasksRaw = ""
@@ -306,15 +313,31 @@ fun TabletAgentApp() {
                             selectedTask = (activeTask ?: tasks.first()).optString("id")
                         }
                         if (activeTask != null) {
+                            val atid = activeTask.optString("id")
+                            if (atid.isNotBlank()) activeRunningTasks.add(atid)
                             AgentForegroundService.update(
                                 context,
-                                activeTask.optString("id"),
+                                atid,
                                 activeTask.optString("status"),
                                 activeTask.optString("prompt")
                             )
                         } else if (tasks.isNotEmpty() && tasks.all { it.optString("status") in listOf("PLANNED", "COMPLETED", "NEEDS_VERIFICATION", "FAILED", "CANCELLED", "BLOCKED_SETUP", "INTERRUPTED") }) {
                             AgentForegroundService.stop(context)
                         }
+
+                        // Check for task completion alerts and haptic feedback
+                        for (t in tasks) {
+                            val tid = t.optString("id")
+                            val tStatus = t.optString("status")
+                            if (tid in activeRunningTasks && tStatus in listOf("PLANNED", "COMPLETED", "NEEDS_VERIFICATION", "FAILED")) {
+                                if (tid !in notifiedCompletedTasks) {
+                                    notifiedCompletedTasks.add(tid)
+                                    activeRunningTasks.remove(tid)
+                                    AgentForegroundService.notifyTaskCompleted(context, selectedProject, tid, tStatus, t.optString("prompt"))
+                                }
+                            }
+                        }
+
                         if (pollTick % 3 == 0) {
                             val p = api.previewStatus(selectedProject)
                             val pState = p.optString("status", "stopped")
@@ -346,6 +369,14 @@ fun TabletAgentApp() {
                                     if (appRaw != lastApprovalsRaw) {
                                         lastApprovalsRaw = appRaw
                                         approvals = appArr.objects()
+                                        for (app in approvals) {
+                                            val aid = app.optString("id")
+                                            if (aid.isNotBlank() && aid !in notifiedApprovalIds) {
+                                                notifiedApprovalIds.add(aid)
+                                                val actDesc = app.optString("action", app.optString("command", "Agent action confirmation required"))
+                                                AgentForegroundService.notifyApprovalRequired(context, selectedProject, selectedTask, actDesc)
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -1801,7 +1832,7 @@ private fun FilesScreen(
                         }
                     } else currentContent
 
-                    OutlinedTextField(
+                    CodeEditorWithLineNumbers(
                         value = displayValue,
                         onValueChange = { newVal ->
                             if (!isEnv || !maskSecrets) {
@@ -1809,9 +1840,9 @@ private fun FilesScreen(
                                 if (activeTab == selected) onEdit(newVal)
                             }
                         },
+                        filePath = activeTab,
                         readOnly = isEnv && maskSecrets,
-                        modifier = Modifier.fillMaxSize(),
-                        textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)
+                        modifier = Modifier.fillMaxSize()
                     )
                 }
             } else {
@@ -1835,14 +1866,14 @@ private fun FilesScreen(
                                 modifier = Modifier.height(28.dp)
                             ) { Text("Save", fontSize = 10.sp) }
                         }
-                        OutlinedTextField(
+                        CodeEditorWithLineNumbers(
                             value = pane1Content,
                             onValueChange = { newVal ->
                                 tabBodies[activeTab] = newVal
                                 if (activeTab == selected) onEdit(newVal)
                             },
-                            modifier = Modifier.fillMaxSize(),
-                            textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+                            filePath = activeTab,
+                            modifier = Modifier.fillMaxSize()
                         )
                     }
 
@@ -1862,13 +1893,13 @@ private fun FilesScreen(
                                 modifier = Modifier.height(28.dp)
                             ) { Text("Save", fontSize = 10.sp) }
                         }
-                        OutlinedTextField(
+                        CodeEditorWithLineNumbers(
                             value = pane2Content,
                             onValueChange = { newVal ->
                                 tabBodies[pane2Path] = newVal
                             },
-                            modifier = Modifier.fillMaxSize(),
-                            textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+                            filePath = pane2Path,
+                            modifier = Modifier.fillMaxSize()
                         )
                     }
                 }
@@ -2324,6 +2355,19 @@ fun GitReviewDialog(
     var isPrivateRepo by remember { mutableStateOf(true) }
     var newRepoDesc by remember(project) { mutableStateOf("Created with Tablet Agent Studio") }
     var createNewRepoMode by remember { mutableStateOf(false) }
+    var hasConflicts by remember { mutableStateOf(false) }
+    var conflictedFiles by remember { mutableStateOf<List<String>>(emptyList()) }
+    var resolvingConflicts by remember { mutableStateOf(false) }
+
+    var showPrDialog by remember { mutableStateOf(false) }
+    var draftingPr by remember { mutableStateOf(false) }
+    var creatingPr by remember { mutableStateOf(false) }
+    var prHeadBranch by remember { mutableStateOf("") }
+    var prBaseBranch by remember { mutableStateOf("main") }
+    var prTitle by remember { mutableStateOf("") }
+    var prBody by remember { mutableStateOf("") }
+    var showPrSuccessDialog by remember { mutableStateOf(false) }
+    var createdPrUrl by remember { mutableStateOf("") }
 
     fun refresh() {
         loading = true
@@ -2348,6 +2392,10 @@ fun GitReviewDialog(
                 if (!hasOriginRemote) {
                     createNewRepoMode = true
                 }
+                val hasConf = st.optBoolean("has_conflicts", false)
+                val confArr = st.optJSONArray("conflicted_files")
+                hasConflicts = hasConf
+                conflictedFiles = if (confArr != null) (0 until confArr.length()).map { confArr.getString(it) } else emptyList()
             } catch (e: Exception) {
                 notify(e)
             } finally {
@@ -2630,13 +2678,25 @@ fun GitReviewDialog(
                                         }
 
                                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            val ctx = LocalContext.current
                                             FilledTonalButton(
                                                 onClick = {
                                                     pulling = true
                                                     scope.launch {
                                                         try {
-                                                            val res = api.gitPull(project, "origin", currentBranch)
-                                                            pullResult = res.optString("output", "Pull complete")
+                                                            val ghToken = SecureSecrets.getKey(ctx, SecureSecrets.KEY_GITHUB)
+                                                            val res = api.gitPull(project, "origin", currentBranch, ghToken)
+                                                            val isConf = res.optBoolean("has_conflicts", false)
+                                                            if (isConf) {
+                                                                hasConflicts = true
+                                                                val confArr = res.optJSONArray("conflicted_files")
+                                                                if (confArr != null) conflictedFiles = (0 until confArr.length()).map { confArr.getString(it) }
+                                                                pullResult = "⚠️ Merge conflicts detected in ${conflictedFiles.size} file(s)"
+                                                                HapticFeedbackHelper.vibrateAlert(ctx)
+                                                            } else {
+                                                                pullResult = res.optString("output", "Pull complete")
+                                                                HapticFeedbackHelper.vibrateSuccess(ctx)
+                                                            }
                                                             refresh()
                                                         } catch (e: Exception) {
                                                             notify(e)
@@ -2661,6 +2721,84 @@ fun GitReviewDialog(
                                                 Icon(if (hasOriginRemote) Icons.Default.CloudUpload else Icons.Default.AddCircle, contentDescription = null, modifier = Modifier.size(16.dp))
                                                 Spacer(Modifier.width(6.dp))
                                                 Text(if (hasOriginRemote) "↑ Push Remote" else "🚀 Create & Push GitHub")
+                                            }
+                                        }
+
+                                        // 1-Click Create PR Button
+                                        Button(
+                                            onClick = {
+                                                draftingPr = true
+                                                scope.launch {
+                                                    try {
+                                                        val draft = api.gitDraftPr(project, "main")
+                                                        prHeadBranch = draft.optString("head", currentBranch)
+                                                        prBaseBranch = draft.optString("base", "main")
+                                                        prTitle = draft.optString("title", "")
+                                                        prBody = draft.optString("body", "")
+                                                        showPrDialog = true
+                                                    } catch (e: Exception) {
+                                                        notify(e)
+                                                    } finally {
+                                                        draftingPr = false
+                                                    }
+                                                }
+                                            },
+                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7C3AED)),
+                                            modifier = Modifier.fillMaxWidth().height(36.dp),
+                                            enabled = !draftingPr
+                                        ) {
+                                            Icon(Icons.Default.CallMerge, contentDescription = null, modifier = Modifier.size(16.dp))
+                                            Spacer(Modifier.width(6.dp))
+                                            Text(if (draftingPr) "Drafting PR with AI…" else "🔀 Create Pull Request", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                        }
+
+                                        // AI Auto-Resolve Conflict Warning Card
+                                        if (hasConflicts) {
+                                            val ctx = LocalContext.current
+                                            Surface(
+                                                color = Color(0xFF450A0A),
+                                                shape = RoundedCornerShape(8.dp),
+                                                border = BorderStroke(1.dp, Color(0xFFDC2626)),
+                                                modifier = Modifier.fillMaxWidth()
+                                            ) {
+                                                Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                                        Icon(Icons.Default.Warning, null, tint = Color(0xFFF87171), modifier = Modifier.size(18.dp))
+                                                        Spacer(Modifier.width(6.dp))
+                                                        Text("Merge Conflicts Detected (${conflictedFiles.size} files)", color = Color(0xFFFEE2E2), fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                                    }
+                                                    if (conflictedFiles.isNotEmpty()) {
+                                                        Text(conflictedFiles.joinToString(", "), color = Color(0xFFFCA5A5), fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                                                    }
+                                                    Button(
+                                                        onClick = {
+                                                            resolvingConflicts = true
+                                                            scope.launch {
+                                                                try {
+                                                                    val res = api.gitResolveConflicts(project)
+                                                                    HapticFeedbackHelper.vibrateSuccess(ctx)
+                                                                    pullResult = "✅ All conflicts resolved & auto-committed: ${res.optString("commit_sha")}"
+                                                                    hasConflicts = false
+                                                                    conflictedFiles = emptyList()
+                                                                    refresh()
+                                                                } catch (e: Exception) {
+                                                                    HapticFeedbackHelper.vibrateError(ctx)
+                                                                    notify(e)
+                                                                } finally {
+                                                                    resolvingConflicts = false
+                                                                }
+                                                            }
+                                                        },
+                                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFDC2626)),
+                                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                                        modifier = Modifier.height(32.dp),
+                                                        enabled = !resolvingConflicts
+                                                    ) {
+                                                        Icon(Icons.Default.AutoAwesome, null, modifier = Modifier.size(14.dp))
+                                                        Spacer(Modifier.width(6.dp))
+                                                        Text(if (resolvingConflicts) "Resolving Conflicts via AI…" else "✨ AI Auto-Resolve Conflicts", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                                    }
+                                                }
                                             }
                                         }
 
@@ -3102,18 +3240,33 @@ fun GitReviewDialog(
                         pushing = true
                         scope.launch {
                             try {
+                                val ghToken = SecureSecrets.getKey(ctx, SecureSecrets.KEY_GITHUB)
                                 if (createNewRepoMode) {
-                                    val res = api.gitCreateAndPush(project, newRepoName, isPrivateRepo, newRepoDesc)
+                                    val res = api.gitCreateAndPush(project, newRepoName, isPrivateRepo, newRepoDesc, ghToken)
                                     showPushDialog = false
                                     refresh()
+                                    HapticFeedbackHelper.vibrateSuccess(ctx)
                                     notify(Throwable("Created & Pushed: ${res.optString("html_url", res.optString("repo_name"))}"))
                                 } else {
                                     val res = api.gitPush(project, "origin", currentBranch)
                                     showPushDialog = false
                                     refresh()
+                                    HapticFeedbackHelper.vibrateSuccess(ctx)
                                     notify(Throwable("Pushed successfully: ${res.optString("branch")}"))
+                                    // If pushed branch is not main/master, prompt to create PR
+                                    if (currentBranch != "main" && currentBranch != "master") {
+                                        runCatching {
+                                            val draft = api.gitDraftPr(project, "main")
+                                            prHeadBranch = draft.optString("head", currentBranch)
+                                            prBaseBranch = draft.optString("base", "main")
+                                            prTitle = draft.optString("title", "")
+                                            prBody = draft.optString("body", "")
+                                            showPrDialog = true
+                                        }
+                                    }
                                 }
                             } catch (e: Exception) {
+                                HapticFeedbackHelper.vibrateError(ctx)
                                 notify(e)
                             } finally {
                                 pushing = false
@@ -3136,6 +3289,138 @@ fun GitReviewDialog(
             },
             dismissButton = {
                 TextButton(onClick = { showPushDialog = false }, enabled = !pushing) { Text("Cancel") }
+            }
+        )
+    }
+
+    if (showPrDialog) {
+        val ctx = LocalContext.current
+        AlertDialog(
+            onDismissRequest = { if (!creatingPr) showPrDialog = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Icon(Icons.Default.CallMerge, contentDescription = null, tint = Color(0xFF8B5CF6))
+                    Text("Create Pull Request", fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Surface(color = Color(0xFF7C3AED).copy(alpha = 0.2f), shape = RoundedCornerShape(4.dp)) {
+                            Text(prHeadBranch.ifBlank { currentBranch }, color = Color(0xFFA78BFA), fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                        }
+                        Text("➔", color = MaterialTheme.colorScheme.outline, fontSize = 12.sp)
+                        Surface(color = Color(0xFF374151), shape = RoundedCornerShape(4.dp)) {
+                            Text(prBaseBranch.ifBlank { "main" }, color = Color(0xFF93C5FD), fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                        }
+                    }
+
+                    OutlinedTextField(
+                        value = prTitle,
+                        onValueChange = { prTitle = it },
+                        label = { Text("PR Title") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    OutlinedTextField(
+                        value = prBody,
+                        onValueChange = { prBody = it },
+                        label = { Text("PR Description (Markdown)") },
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 120.dp, max = 220.dp),
+                        textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        creatingPr = true
+                        scope.launch {
+                            try {
+                                val ghToken = SecureSecrets.getKey(ctx, SecureSecrets.KEY_GITHUB)
+                                val res = api.gitCreatePr(project, prTitle, prBody, prHeadBranch, prBaseBranch, ghToken)
+                                HapticFeedbackHelper.vibrateSuccess(ctx)
+                                createdPrUrl = res.optString("pr_url", "")
+                                showPrDialog = false
+                                showPrSuccessDialog = true
+                            } catch (e: Exception) {
+                                HapticFeedbackHelper.vibrateError(ctx)
+                                notify(e)
+                            } finally {
+                                creatingPr = false
+                            }
+                        }
+                    },
+                    enabled = !creatingPr && prTitle.isNotBlank(),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7C3AED))
+                ) {
+                    if (creatingPr) {
+                        CircularProgressIndicator(color = Color.White, modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(6.dp))
+                    }
+                    Text(if (creatingPr) "Creating PR…" else "🚀 Submit Pull Request")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showPrDialog = false }, enabled = !creatingPr) { Text("Cancel") }
+            }
+        )
+    }
+
+    if (showPrSuccessDialog) {
+        val ctx = LocalContext.current
+        AlertDialog(
+            onDismissRequest = { showPrSuccessDialog = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Icon(Icons.Default.CheckCircle, null, tint = Color(0xFF10B981))
+                    Text("Pull Request Created!")
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Your Pull Request has been opened successfully on GitHub.")
+                    if (createdPrUrl.isNotBlank()) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            shape = RoundedCornerShape(6.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(createdPrUrl, fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(8.dp))
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showPrSuccessDialog = false
+                        if (createdPrUrl.isNotBlank()) {
+                            runCatching {
+                                val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(createdPrUrl)).apply {
+                                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                                }
+                                ctx.startActivity(intent)
+                            }
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))
+                ) {
+                    Icon(Icons.Default.OpenInBrowser, null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("View on GitHub")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showPrSuccessDialog = false }) { Text("Done") }
             }
         )
     }

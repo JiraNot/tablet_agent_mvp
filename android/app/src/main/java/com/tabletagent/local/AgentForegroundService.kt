@@ -12,6 +12,7 @@ import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import com.tabletagent.local.ui.HapticFeedbackHelper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -154,16 +155,28 @@ class AgentForegroundService : Service() {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            val progressChannel = NotificationChannel(
                 CHANNEL_ID,
-                "OmniDev Tablet Tasks",
+                "OmniDev Background Tasks",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
                 description = "Shows progress and prevents background suspension during active agent runs"
                 setShowBadge(false)
             }
-            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            nm.createNotificationChannel(channel)
+            val alertsChannel = NotificationChannel(
+                CHANNEL_ALERTS,
+                "OmniDev Task Alerts & Approvals",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "Notifies when tasks finish or require user confirmation/approval"
+                setShowBadge(true)
+                enableLights(true)
+                enableVibration(true)
+                vibrationPattern = longArrayOf(0, 100, 70, 100)
+            }
+            nm.createNotificationChannel(progressChannel)
+            nm.createNotificationChannel(alertsChannel)
         }
     }
 
@@ -203,6 +216,7 @@ class AgentForegroundService : Service() {
 
     companion object {
         const val CHANNEL_ID = "tablet_agent_channel"
+        const val CHANNEL_ALERTS = "tablet_agent_alerts"
         const val NOTIFICATION_ID = 2026
 
         const val ACTION_START = "com.tabletagent.local.ACTION_START"
@@ -244,6 +258,115 @@ class AgentForegroundService : Service() {
         fun stop(context: Context) {
             runCatching {
                 context.stopService(Intent(context, AgentForegroundService::class.java))
+            }
+        }
+
+        fun notifyTaskCompleted(context: Context, project: String, taskId: String, status: String, summary: String = "") {
+            runCatching {
+                val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    val alertsChannel = NotificationChannel(
+                        CHANNEL_ALERTS,
+                        "OmniDev Task Alerts & Approvals",
+                        NotificationManager.IMPORTANCE_HIGH
+                    ).apply {
+                        description = "Notifies when tasks finish or require user confirmation/approval"
+                        setShowBadge(true)
+                        enableLights(true)
+                        enableVibration(true)
+                        vibrationPattern = longArrayOf(0, 100, 70, 100)
+                    }
+                    nm.createNotificationChannel(alertsChannel)
+                }
+
+                val title = when (status) {
+                    "COMPLETED", "PLANNED" -> {
+                        HapticFeedbackHelper.vibrateSuccess(context)
+                        "✅ Task Completed: $project"
+                    }
+                    "FAILED" -> {
+                        HapticFeedbackHelper.vibrateError(context)
+                        "❌ Task Failed: $project"
+                    }
+                    "NEEDS_VERIFICATION" -> {
+                        HapticFeedbackHelper.vibrateAlert(context)
+                        "⚠️ Verification Needed: $project"
+                    }
+                    else -> {
+                        HapticFeedbackHelper.vibrateSuccess(context)
+                        "Task $status: $project"
+                    }
+                }
+
+                val openAppIntent = Intent(context, MainActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                    putExtra("OPEN_PROJECT", project)
+                    putExtra("OPEN_TASK_ID", taskId)
+                }
+                val flagImmutable = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
+                val pendingIntent = PendingIntent.getActivity(
+                    context,
+                    taskId.hashCode(),
+                    openAppIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or flagImmutable
+                )
+
+                val notif = NotificationCompat.Builder(context, CHANNEL_ALERTS)
+                    .setSmallIcon(android.R.drawable.stat_notify_more)
+                    .setContentTitle(title)
+                    .setContentText(summary.ifBlank { "Task finished with status $status" })
+                    .setContentIntent(pendingIntent)
+                    .setAutoCancel(true)
+                    .setPriority(NotificationCompat.PRIORITY_HIGH)
+                    .build()
+
+                nm.notify(taskId.hashCode(), notif)
+            }
+        }
+
+        fun notifyApprovalRequired(context: Context, project: String, taskId: String, actionDescription: String) {
+            runCatching {
+                val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    val alertsChannel = NotificationChannel(
+                        CHANNEL_ALERTS,
+                        "OmniDev Task Alerts & Approvals",
+                        NotificationManager.IMPORTANCE_HIGH
+                    ).apply {
+                        description = "Notifies when tasks finish or require user confirmation/approval"
+                        setShowBadge(true)
+                        enableLights(true)
+                        enableVibration(true)
+                        vibrationPattern = longArrayOf(0, 100, 70, 100)
+                    }
+                    nm.createNotificationChannel(alertsChannel)
+                }
+
+                HapticFeedbackHelper.vibrateAlert(context)
+
+                val openAppIntent = Intent(context, MainActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                    putExtra("OPEN_PROJECT", project)
+                    putExtra("OPEN_TASK_ID", taskId)
+                }
+                val flagImmutable = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
+                val pendingIntent = PendingIntent.getActivity(
+                    context,
+                    (taskId + "_approval").hashCode(),
+                    openAppIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or flagImmutable
+                )
+
+                val notif = NotificationCompat.Builder(context, CHANNEL_ALERTS)
+                    .setSmallIcon(android.R.drawable.stat_sys_warning)
+                    .setContentTitle("🔔 Approval Required: $project")
+                    .setContentText(actionDescription.ifBlank { "Agent is waiting for your confirmation" })
+                    .setContentIntent(pendingIntent)
+                    .setAutoCancel(true)
+                    .setPriority(NotificationCompat.PRIORITY_MAX)
+                    .build()
+
+                nm.notify((taskId + "_approval").hashCode(), notif)
             }
         }
     }

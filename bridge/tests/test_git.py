@@ -115,5 +115,93 @@ class GitTests(unittest.TestCase):
         self.assertTrue(c_res['success'])
         self.assertTrue(c_res['committed'])
 
+    def test_git_draft_pr(self):
+        # Create a new branch and a commit
+        git = shutil.which('git')
+        subprocess.run([git, 'checkout', '-b', 'feat/test-pr'], cwd=self.proj_path, capture_output=True, check=True)
+        (self.proj_path / 'feature.py').write_text('def hello():\n    return "world"\n')
+        self.core.git_commit('testgit', 'feat(core): add hello world feature')
+
+        # Draft PR
+        pr_draft = self.core.git_draft_pr('testgit', base_branch='master')
+        self.assertEqual(pr_draft['head'], 'feat/test-pr')
+        self.assertIn('feat', pr_draft['title'])
+        self.assertIn('## Summary', pr_draft['body'])
+        self.assertIn('## Verification', pr_draft['body'])
+        self.assertGreaterEqual(pr_draft['commits_count'], 1)
+
+    def test_git_resolve_conflicts(self):
+        # Create a conflicted file with conflict markers
+        conflicted_content = (
+            "import os\n"
+            "<<<<<<< HEAD\n"
+            "import sys\n"
+            "def local_function():\n"
+            "    return 'local'\n"
+            "=======\n"
+            "import json\n"
+            "def remote_function():\n"
+            "    return 'remote'\n"
+            ">>>>>>> origin/main\n"
+        )
+        conflicted_file = self.proj_path / 'conflicted.py'
+        conflicted_file.write_text(conflicted_content, encoding='utf-8')
+
+        # Stage as unmerged conflict or unmerged file in git
+        git = shutil.which('git')
+        subprocess.run([git, 'add', 'conflicted.py'], cwd=self.proj_path, capture_output=True, check=True)
+
+        # Status check
+        st = self.core.git_status('testgit')
+        self.assertTrue(st['is_git'])
+
+        # Now test resolve_conflicts method
+        # Manually invoke resolve_conflicts by mocking diff filter or setting unmerged
+        # Test the conflict resolution logic
+        res = self.core.git_resolve_conflicts('testgit')
+        # If git diff --diff-filter=U doesn't see real unmerged index, res['success'] is True
+        self.assertTrue(res['success'])
+
+    def test_git_resolve_real_merge_conflict(self):
+        git = shutil.which('git')
+        # Create branch-conflict
+        subprocess.run([git, 'checkout', '-b', 'branch-conflict'], cwd=self.proj_path, capture_output=True, check=True)
+        (self.proj_path / 'shared.txt').write_text("line 1\nlocal feature line\nline 3\n", encoding='utf-8')
+        subprocess.run([git, 'add', 'shared.txt'], cwd=self.proj_path, capture_output=True, check=True)
+        subprocess.run([git, 'commit', '-m', 'feat: local change on branch-conflict'], cwd=self.proj_path, capture_output=True, check=True)
+
+        # Checkout master (or initial branch)
+        subprocess.run([git, 'checkout', 'master'], cwd=self.proj_path, capture_output=True, check=True)
+        (self.proj_path / 'shared.txt').write_text("line 1\nremote conflicting line\nline 3\n", encoding='utf-8')
+        subprocess.run([git, 'add', 'shared.txt'], cwd=self.proj_path, capture_output=True, check=True)
+        subprocess.run([git, 'commit', '-m', 'feat: remote change on master'], cwd=self.proj_path, capture_output=True, check=True)
+
+        # Trigger merge conflict
+        merge_res = subprocess.run([git, 'merge', 'branch-conflict'], cwd=self.proj_path, capture_output=True, text=True)
+        self.assertNotEqual(merge_res.returncode, 0)
+        self.assertIn('CONFLICT', merge_res.stdout + merge_res.stderr)
+
+        # Check status detects conflict
+        st = self.core.git_status('testgit')
+        self.assertTrue(st['has_conflicts'])
+        self.assertIn('shared.txt', st['conflicted_files'])
+
+        # Now auto-resolve via AI
+        resolve_res = self.core.git_resolve_conflicts('testgit')
+        self.assertTrue(resolve_res['success'])
+        self.assertIn('shared.txt', resolve_res['resolved_files'])
+        self.assertTrue(bool(resolve_res['commit_sha']))
+
+        # Verify markers are gone
+        resolved_text = (self.proj_path / 'shared.txt').read_text(encoding='utf-8')
+        self.assertNotIn('<<<<<<<', resolved_text)
+        self.assertNotIn('=======', resolved_text)
+        self.assertNotIn('>>>>>>>', resolved_text)
+
+        # Check status is now clean
+        st_after = self.core.git_status('testgit')
+        self.assertFalse(st_after['has_conflicts'])
+        self.assertTrue(st_after['clean'])
+
 if __name__ == '__main__':
     unittest.main()
