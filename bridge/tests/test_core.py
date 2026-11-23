@@ -139,7 +139,8 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(len(page['events']),1)
     def test_orphan_process_reconciled_on_restart(self):
         import subprocess
-        proc=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'],start_new_session=True)
+        kwargs = {'start_new_session': True} if os.name != 'nt' else {}
+        proc=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'], **kwargs)
         self.addCleanup(lambda: proc.kill() if proc.poll() is None else None)
         self.core._register_pid('task:orphan-1',proc,'python')
         restarted=LocalCore(self.root/'data')
@@ -200,5 +201,24 @@ class CoreTests(unittest.TestCase):
         import sqlite3
         with self.assertRaises(sqlite3.DatabaseError):
             LocalCore(bad_root)
+    def test_save_attachment_success_and_validation(self):
+        import base64
+        payload = b'\x89PNG\r\n\x1a\nFakePngBinaryData'
+        b64 = base64.b64encode(payload).decode('ascii')
+        res = self.core.save_attachment('demo', '../../suspicious/screenshot.png', b64)
+        self.assertEqual(res['filename'], 'screenshot.png')
+        self.assertEqual(res['path'], '.agents/attachments/screenshot.png')
+        self.assertEqual(res['size_bytes'], len(payload))
+        saved = self.core._project('demo') / '.agents' / 'attachments' / 'screenshot.png'
+        self.assertTrue(saved.is_file())
+        self.assertEqual(saved.read_bytes(), payload)
+
+        from core import BridgeError
+        with self.assertRaises(BridgeError):
+            self.core.save_attachment('demo', 'bad.bin', 'NOT_VALID_B64!@#%')
+
+        too_big = base64.b64encode(b'A' * (25 * 1024 * 1024 + 1)).decode('ascii')
+        with self.assertRaises(BridgeError):
+            self.core.save_attachment('demo', 'huge.bin', too_big)
 
 if __name__=='__main__':unittest.main()

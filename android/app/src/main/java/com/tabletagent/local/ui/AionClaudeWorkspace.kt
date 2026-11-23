@@ -59,6 +59,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.platform.LocalContext
 import java.util.Locale
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Dispatchers
 import org.json.JSONObject
 
 data class AttachmentItem(
@@ -591,7 +594,9 @@ fun ClaudeCodeTopBar(
     apks: List<JSONObject> = emptyList(),
     onInstallApk: (String) -> Unit = {},
     onExportProject: () -> Unit = {},
-    onViewMemory: () -> Unit = {}
+    onViewMemory: () -> Unit = {},
+    onUploadAttachment: (suspend (String, String) -> String?)? = null,
+    onApplyCode: ((filename: String, code: String) -> Unit)? = null
 ) {
     Surface(
         color = MaterialTheme.colorScheme.surface,
@@ -720,7 +725,8 @@ fun ClaudeCodeTopBar(
                                 Triple(0, "Chat View", Icons.Default.ChatBubbleOutline),
                                 Triple(1, "Split (Chat + Preview)", Icons.Default.VerticalSplit),
                                 Triple(2, "Full Preview", Icons.Default.Visibility),
-                                Triple(3, "Quick Files", Icons.Default.FolderOpen)
+                                Triple(3, "Quick Files", Icons.Default.FolderOpen),
+                                Triple(5, "Linux PTY Terminal", Icons.Default.Terminal)
                             ).forEach { (idx, label, icon) ->
                                 DropdownMenuItem(
                                     leadingIcon = { Icon(icon, null, Modifier.size(16.dp)) },
@@ -751,6 +757,26 @@ fun ClaudeCodeTopBar(
                             contentDescription = "Files",
                             modifier = Modifier.size(14.dp),
                             tint = if (workspaceView == 3) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    // Compact Icon Button for Linux PTY Terminal
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .size(28.dp)
+                            .clip(RoundedCornerShape(7.dp))
+                            .background(
+                                if (workspaceView == 5) MaterialTheme.colorScheme.primaryContainer
+                                else MaterialTheme.colorScheme.surfaceVariant
+                            )
+                            .clickable { onSelectWorkspaceView(if (workspaceView == 5) 0 else 5) }
+                    ) {
+                        Icon(
+                            Icons.Default.Terminal,
+                            contentDescription = "Terminal",
+                            modifier = Modifier.size(14.dp),
+                            tint = if (workspaceView == 5) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
 
@@ -1104,7 +1130,9 @@ fun AionClaudeAgentPane(
     apks: List<JSONObject> = emptyList(),
     onInstallApk: (String) -> Unit = {},
     onExportProject: () -> Unit = {},
-    onViewMemory: () -> Unit = {}
+    onViewMemory: () -> Unit = {},
+    onUploadAttachment: (suspend (String, String) -> String?)? = null,
+    onApplyCode: ((filename: String, code: String) -> Unit)? = null
 ) {
     val rawAgents = if (agents.isNotEmpty()) agents.map {
         Triple(it.optString("name"), it.optString("display_name"), it.optBoolean("available", true))
@@ -1143,26 +1171,49 @@ fun AionClaudeAgentPane(
     var modelMenuExpanded by remember { mutableStateOf(false) }
     var projectMenuExpanded by remember { mutableStateOf(false) }
     var agentMenuExpanded by remember { mutableStateOf(false) }
+    var applyCodeData by remember { mutableStateOf<Pair<String, String>?>(null) }
+    val scope = rememberCoroutineScope()
+
+    val processAndUploadUri: (Uri, String) -> Unit = { uri, type ->
+        val name = getFileNameFromUri(context, uri)
+        scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val stream = context.contentResolver.openInputStream(uri)
+                val bytes = stream?.use { it.readBytes() } ?: ByteArray(0)
+                if (bytes.size > 25 * 1024 * 1024) {
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        Toast.makeText(context, "Attachment exceeds 25 MB limit", Toast.LENGTH_SHORT).show()
+                    }
+                    return@launch
+                }
+                val b64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+                val targetPath = if (onUploadAttachment != null) {
+                    onUploadAttachment(name, b64) ?: ".agents/attachments/$name"
+                } else {
+                    ".agents/attachments/$name"
+                }
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    attachments = attachments + AttachmentItem(name = name, path = targetPath, type = type, sizeBytes = bytes.size.toLong(), uriString = uri.toString())
+                    Toast.makeText(context, "Attached: $name", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    Toast.makeText(context, "Upload failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
 
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
-        uri?.let {
-            val name = getFileNameFromUri(context, it)
-            attachments = attachments + AttachmentItem(name = name, path = it.toString(), type = "image", uriString = it.toString())
-        }
+        uri?.let { processAndUploadUri(it, "image") }
     }
 
     val videoPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
-        uri?.let {
-            val name = getFileNameFromUri(context, it)
-            attachments = attachments + AttachmentItem(name = name, path = it.toString(), type = "video", uriString = it.toString())
-        }
+        uri?.let { processAndUploadUri(it, "video") }
     }
 
     val docPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
-        uri?.let {
-            val name = getFileNameFromUri(context, it)
-            attachments = attachments + AttachmentItem(name = name, path = it.toString(), type = "document", uriString = it.toString())
-        }
+        uri?.let { processAndUploadUri(it, "document") }
     }
 
     val speechLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
@@ -1276,6 +1327,19 @@ fun AionClaudeAgentPane(
             }
         )
     }
+
+    applyCodeData?.let { (filename, code) ->
+        ApplyToFileConfirmDialog(
+            initialFilename = filename,
+            code = code,
+            onDismiss = { applyCodeData = null },
+            onConfirm = { targetPath ->
+                onApplyCode?.invoke(targetPath, code)
+                applyCodeData = null
+            }
+        )
+    }
+
     val currentTask = tasks.firstOrNull { it.optString("id") == selectedTask }
 
     if (isNewChatMode || selectedTask.isBlank() || currentTask == null) {
@@ -2412,7 +2476,8 @@ fun AionClaudeAgentPane(
                                 turn = turn,
                                 agentInitial = agentInitial,
                                 agentTitle = agentTitle,
-                                isLatestAndRunning = isRunning && turn == groupedTurns.lastOrNull()
+                                isLatestAndRunning = isRunning && turn == groupedTurns.lastOrNull(),
+                                onApplyCode = { fname, code -> applyCodeData = Pair(fname, code) }
                             )
                         }
 
@@ -2998,7 +3063,8 @@ private fun StreamingAssistantMessageCard(
     turn: ChatTurnItem.MessageTurn,
     agentInitial: String,
     agentTitle: String,
-    isLatestAndRunning: Boolean
+    isLatestAndRunning: Boolean,
+    onApplyCode: ((filename: String, code: String) -> Unit)? = null
 ) {
     val fullText = turn.text
     var revealedLength by remember(turn.seq, fullText) {
@@ -3060,12 +3126,19 @@ private fun StreamingAssistantMessageCard(
                 .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(12.dp))
                 .padding(11.dp)
         ) {
-            Text(
-                displayText,
-                style = MaterialTheme.typography.bodyMedium,
-                maxLines = if (!isLongText || expandedText || isLatestAndRunning) Int.MAX_VALUE else 8,
-                overflow = TextOverflow.Ellipsis
-            )
+            if (!isLongText || expandedText || isLatestAndRunning) {
+                MarkdownAssistantContent(
+                    markdown = displayText,
+                    onApplyCode = onApplyCode
+                )
+            } else {
+                Text(
+                    displayText,
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 8,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
             if (isLongText && !isLatestAndRunning) {
                 Spacer(Modifier.height(6.dp))
                 Row(

@@ -12,11 +12,14 @@ import shutil
 import signal
 import socket
 import sqlite3
+import struct
 import subprocess
+import sys
 import threading
 import time
 import uuid
 import zipfile
+from collections import deque
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from contextlib import contextmanager
@@ -27,8 +30,10 @@ ALLOWED_MODES = {'plan', 'build'}
 TERMINAL = {'PLANNED', 'COMPLETED', 'NEEDS_VERIFICATION', 'FAILED', 'CANCELLED', 'BLOCKED_SETUP', 'INTERRUPTED'}
 MAX_LOG_CHARS = 6000
 MAX_FILE_BYTES = 256 * 1024
+MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 MAX_EVENTS_PER_TASK = 2500
 NAME_RE = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9._-]{0,69}$')
+BRANCH_RE = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,120}$')
 DESTRUCTIVE_CMD_RE = re.compile(
     r'(\brm\s+-[a-zA-Z]*[rf][a-zA-Z]*\b'
     r'|\bgit\s+reset\s+--hard\b'
@@ -468,6 +473,7 @@ class LocalCore:
         self.app_server_turns: dict[str, tuple[subprocess.Popen, str, str]] = {}
         self.thread_candidates: dict[str, str] = {}
         self.previews: dict[str, dict[str, Any]] = {}
+        self.terminals: dict[str, dict[str, Any]] = {}
         self.approval_events: dict[str, threading.Event] = {}
         self.task_queues: dict[str, list[dict[str, Any]]] = {}
         self.active_worktrees: dict[str, Path] = {}
@@ -734,12 +740,15 @@ class LocalCore:
             raise BridgeError('Binary files cannot be opened')
         return {'path': rel, 'content': content}
 
-    def write_file(self, project: str, rel: str, content: str):
+    def write_file(self, project: str, rel: str, content: str, create_dirs: bool = False):
         if len(content.encode('utf-8')) > MAX_FILE_BYTES:
             raise BridgeError('File too large (256 KiB limit)', 413)
         p = self._file(project, rel)
         if not p.parent.is_dir():
-            raise BridgeError('Parent directory not found', 404)
+            if create_dirs:
+                p.parent.mkdir(parents=True, exist_ok=True)
+            else:
+                raise BridgeError('Parent directory not found', 404)
         tmp = p.parent / f'.{p.name}.{uuid.uuid4().hex}.tmp'
         fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
@@ -755,6 +764,35 @@ class LocalCore:
                 tmp.unlink(missing_ok=True)
             raise
         return {'path': rel, 'bytes': len(content.encode('utf-8'))}
+
+    def save_attachment(self, project: str, filename: str, data_b64: str) -> dict[str, Any]:
+        import base64
+        if not data_b64 or not isinstance(data_b64, str):
+            raise BridgeError('Missing base64 attachment payload', 400)
+        try:
+            raw = base64.b64decode(data_b64, validate=True)
+        except Exception:
+            raise BridgeError('Invalid base64 encoding', 400)
+        if len(raw) > MAX_ATTACHMENT_BYTES:
+            raise BridgeError('Attachment exceeds 25 MB limit', 413)
+        safe_name = re.sub(r'[^a-zA-Z0-9_.-]', '_', Path(filename).name)
+        if not safe_name or safe_name in ('.', '..'):
+            safe_name = f'attachment_{int(time.time())}.bin'
+        att_dir = self._project(project) / '.agents' / 'attachments'
+        att_dir.mkdir(parents=True, exist_ok=True)
+        target = att_dir / safe_name
+        tmp = att_dir / f'.{safe_name}.{uuid.uuid4().hex}.tmp'
+        try:
+            tmp.write_bytes(raw)
+            os.replace(tmp, target)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
+        return {
+            'path': f'.agents/attachments/{safe_name}',
+            'size_bytes': len(raw),
+            'filename': safe_name
+        }
 
     def append(self, task: str, kind: str, message: str):
         msg = REDACTION.sub('[REDACTED]', str(message))[:MAX_LOG_CHARS]
@@ -1683,22 +1721,9 @@ class LocalCore:
             if mode=='plan':
                 self.set_status(task_id,'PLANNED',result=output);return
             self.set_status(task_id,'VERIFYING',result=output)
-            pkg=project_path/'package.json'
-            command=None
-            needs_install=False
-            if pkg.is_file():
-                try:
-                    pkg_json=json.loads(pkg.read_text())
-                    scripts=pkg_json.get('scripts',{})
-                    has_deps=bool(pkg_json.get('dependencies') or pkg_json.get('devDependencies'))
-                    needs_install=has_deps and not (project_path/'node_modules').is_dir()
-                    if 'build' in scripts and shutil.which('npm'):
-                        command=['npm','run','build']
-                    elif 'test' in scripts and shutil.which('npm'):
-                        command=['npm','test','--','--runInBand'] if 'jest' in scripts.get('test','') else ['npm','test']
-                except (ValueError, OSError):pass
+            command, needs_install = self._detect_verify_command(project_path)
             if not command:
-                self.set_status(task_id,'NEEDS_VERIFICATION',verification='No supported npm build/test script found; do not claim verified success')
+                self.set_status(task_id,'NEEDS_VERIFICATION',verification='No supported npm/python build or test command found; do not claim verified success')
                 return
             if needs_install and shutil.which('npm'):
                 rc_inst, inst_out = self._run(task_id, ['npm', 'install', '--no-audit', '--no-fund'], project_path, timeout=300, phase='verify')
@@ -1751,58 +1776,161 @@ class LocalCore:
             except Exception:
                 pass
 
+    def _detect_verify_command(self, project_path: Path) -> tuple[list[str] | None, bool]:
+        pkg = project_path / 'package.json'
+        if pkg.is_file():
+            try:
+                pkg_json = json.loads(pkg.read_text(encoding='utf-8'))
+                scripts = pkg_json.get('scripts', {})
+                has_deps = bool(pkg_json.get('dependencies') or pkg_json.get('devDependencies'))
+                needs_install = has_deps and not (project_path / 'node_modules').is_dir()
+                if 'build' in scripts and shutil.which('npm'):
+                    return ['npm', 'run', 'build'], needs_install
+                if 'test' in scripts and shutil.which('npm'):
+                    cmd = ['npm', 'test', '--', '--runInBand'] if 'jest' in str(scripts.get('test', '')) else ['npm', 'test']
+                    return cmd, needs_install
+            except (ValueError, OSError):
+                pass
+        # Monorepo fallback: frontend/package.json
+        fe_pkg = project_path / 'frontend' / 'package.json'
+        if fe_pkg.is_file() and shutil.which('npm'):
+            try:
+                fe_scripts = json.loads(fe_pkg.read_text(encoding='utf-8')).get('scripts', {})
+                if 'build' in fe_scripts:
+                    return ['npm', '--prefix', 'frontend', 'run', 'build'], False
+                if 'test' in fe_scripts:
+                    return ['npm', '--prefix', 'frontend', 'test'], False
+            except (ValueError, OSError):
+                pass
+        # Python fallback: pytest or unittest
+        py_bin = shutil.which('python3') or shutil.which('python') or sys.executable
+        has_py_tests = (project_path / 'tests').is_dir() or any(project_path.glob('test_*.py'))
+        if has_py_tests:
+            if shutil.which('pytest'):
+                return ['pytest', '-q'], False
+            if py_bin:
+                return [py_bin, '-m', 'unittest', 'discover', '-v'], False
+        return None, False
+
     def preview(self, project: str):
         self._project(project)
         with self.lock:
             item=self.previews.get(project)
-            if not item: return {'status':'stopped'}
+            if not item: return {'status':'stopped','logs':[]}
             p=item['process']
+            logs = list(item.get('logs', []))
             if p.poll() is None:
-                return {'status':'running','url':f'http://127.0.0.1:{item["port"]}'}
+                return {'status':'running','url':f'http://127.0.0.1:{item["port"]}','stack':item.get('stack','node'),'logs':logs}
             self.previews.pop(project,None)
-        return {'status':'stopped','exit_code':p.returncode}
+        return {'status':'stopped','exit_code':p.returncode,'logs':logs}
+
+    def _detect_preview_command(self, base: Path, port: int | None) -> tuple[list[str], Path, int, str]:
+        # 1. Root package.json scripts.dev
+        pkg = base / 'package.json'
+        if pkg.is_file():
+            try:
+                script = json.loads(pkg.read_text(encoding='utf-8')).get('scripts', {}).get('dev')
+            except (OSError, ValueError, TypeError):
+                script = None
+            if script:
+                npm_cmd = shutil.which('npm')
+                if not npm_cmd:
+                    raise BridgeError('npm is not installed')
+                p = (5173 if 'vite' in str(script).lower() else 3000) if port is None else port
+                dev_cmd = [npm_cmd, 'run', 'dev']
+                if 'vite' in str(script).lower() and '--host' not in str(script):
+                    dev_cmd += ['--', '--host', '127.0.0.1', '--port', str(p)]
+                return dev_cmd, base, p, 'node'
+        # 2. Monorepo frontend/package.json scripts.dev
+        fe_dir = base / 'frontend'
+        fe_pkg = fe_dir / 'package.json'
+        if fe_pkg.is_file():
+            try:
+                fe_script = json.loads(fe_pkg.read_text(encoding='utf-8')).get('scripts', {}).get('dev')
+            except (OSError, ValueError, TypeError):
+                fe_script = None
+            if fe_script and shutil.which('npm'):
+                npm_cmd = shutil.which('npm') or 'npm'
+                p = (5173 if 'vite' in str(fe_script).lower() else 3000) if port is None else port
+                dev_cmd = [npm_cmd, 'run', 'dev']
+                if 'vite' in str(fe_script).lower() and '--host' not in str(fe_script):
+                    dev_cmd += ['--', '--host', '127.0.0.1', '--port', str(p)]
+                return dev_cmd, fe_dir, p, 'monorepo-frontend'
+        # 3. Python FastAPI / Flask / Django
+        py_bin = sys.executable or shutil.which('python3') or shutil.which('python')
+        if (base / 'manage.py').is_file() and py_bin:
+            p = 8000 if port is None else port
+            return [py_bin, 'manage.py', 'runserver', f'127.0.0.1:{p}'], base, p, 'django'
+        for py_entry in ('main.py', 'app.py'):
+            ep = base / py_entry
+            if ep.is_file():
+                try:
+                    head = ep.read_text(encoding='utf-8', errors='replace')[:2000]
+                except OSError:
+                    head = ''
+                p = 8000 if port is None else port
+                if 'FastAPI' in head and shutil.which('uvicorn'):
+                    mod = py_entry[:-3]
+                    return [shutil.which('uvicorn') or 'uvicorn', f'{mod}:app', '--host', '127.0.0.1', '--port', str(p)], base, p, 'fastapi'
+                if 'Flask' in head and py_bin:
+                    return [py_bin, '-m', 'flask', '--app', py_entry, 'run', '--host', '127.0.0.1', '--port', str(p)], base, p, 'flask'
+        # 4. Static HTML fallback
+        if (base / 'index.html').is_file() and py_bin:
+            p = 8080 if port is None else port
+            return [py_bin, '-u', '-m', 'http.server', str(p), '--bind', '127.0.0.1'], base, p, 'static'
+        raise BridgeError('No supported preview target found (needs package.json scripts.dev, Python web app, or index.html)')
 
     def start_preview(self, project: str, port: int | None = None):
         base=self._project(project)
         current=self.preview(project)
         if current['status']=='running':return current
-        pkg=base/'package.json'
-        if not pkg.is_file():raise BridgeError('package.json not found; preview requires npm project')
-        try: script=json.loads(pkg.read_text())['scripts']['dev']
-        except (OSError,ValueError,KeyError,TypeError):raise BridgeError('package.json scripts.dev is required')
-        if not shutil.which('npm'):raise BridgeError('npm is not installed')
-        if port is None:port=5173 if 'vite' in script.lower() else 3000
-        if not 1024<=port<=65535:raise BridgeError('Port must be 1024-65535')
-        env=os.environ.copy();env.update({'PORT':str(port),'HOST':'127.0.0.1','HOSTNAME':'127.0.0.1'})
-        # npm respects cwd and script; no shell construction in our process.
-        npm_cmd = shutil.which('npm') or 'npm'
-        dev_cmd = [npm_cmd, 'run', 'dev']
-        if 'vite' in script.lower() and '--host' not in script:
-            dev_cmd += ['--', '--host', '127.0.0.1', '--port', str(port)]
-        proc=subprocess.Popen(dev_cmd, cwd=base, env=env,
-                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
-                              start_new_session=True)
-        self._register_pid(f'preview:{project}', proc, Path(npm_cmd).stem or 'npm')
-        with self.lock:self.previews[project]={'process':proc,'port':port}
+        dev_cmd, cwd_path, resolved_port, stack = self._detect_preview_command(base, port)
+        if not 1024<=resolved_port<=65535:raise BridgeError('Port must be 1024-65535')
+        env=os.environ.copy();env.update({'PORT':str(resolved_port),'HOST':'127.0.0.1','HOSTNAME':'127.0.0.1'})
+        popen_kwargs: dict[str, Any] = {
+            'cwd': cwd_path,
+            'env': env,
+            'stdin': subprocess.DEVNULL,
+            'stdout': subprocess.PIPE,
+            'stderr': subprocess.STDOUT,
+        }
+        if os.name != 'nt':
+            popen_kwargs['start_new_session'] = True
+        proc=subprocess.Popen(dev_cmd, **popen_kwargs)
+        log_buf: deque[str] = deque(maxlen=200)
+        def _drain_logs(p_obj: subprocess.Popen, buf: deque[str]):
+            if not p_obj.stdout:
+                return
+            try:
+                for raw_line in iter(p_obj.stdout.readline, b''):
+                    text = raw_line.decode('utf-8', errors='replace').rstrip('\r\n')
+                    if text:
+                        buf.append(REDACTION.sub('[REDACTED]', text)[:1000])
+            except Exception:
+                pass
+        threading.Thread(target=_drain_logs, args=(proc, log_buf), daemon=True).start()
+        self._register_pid(f'preview:{project}', proc, Path(dev_cmd[0]).stem or 'preview')
+        with self.lock:self.previews[project]={'process':proc,'port':resolved_port,'stack':stack,'logs':log_buf}
         deadline = time.monotonic() + 12.0
         status = 'starting'
         while time.monotonic() < deadline:
             if proc.poll() is not None:
                 with self.lock:self.previews.pop(project,None)
-                raise BridgeError(f'Preview server exited early (code {proc.returncode})', 500)
+                err_tail = '\n'.join(list(log_buf)[-10:])
+                raise BridgeError(f'Preview server exited early (code {proc.returncode}): {err_tail[:300]}', 500)
             try:
-                with socket.create_connection(('127.0.0.1', port), timeout=0.2):
+                with socket.create_connection(('127.0.0.1', resolved_port), timeout=0.2):
                     status = 'running'
                     break
             except OSError:
                 time.sleep(0.15)
-        return {'status':status,'url':f'http://127.0.0.1:{port}', 'note':'Framework must bind 127.0.0.1 and respect PORT; some scripts need manual configuration'}
+        return {'status':status,'url':f'http://127.0.0.1:{resolved_port}','stack':stack,'logs':list(log_buf),'note':'Framework must bind 127.0.0.1 and respect PORT'}
 
     def stop_preview(self,project:str):
         with self.lock: p=self.previews.pop(project,None)
         if p:self._kill(p['process'])
         self._unregister_pid(f'preview:{project}')
-        return {'status':'stopped'}
+        return {'status':'stopped','logs':[]}
 
     def git_status(self, project: str) -> dict[str, Any]:
         base = self._project(project)
@@ -1887,3 +2015,300 @@ class LocalCore:
 
     def save_project_instructions(self, project: str, content: str) -> dict[str, Any]:
         return self.write_file(project, 'AGENTS.md', content)
+
+    # ---- Phase 2: Git Branch, Push & Checkpoint ----
+
+    def git_branches(self, project: str) -> dict[str, Any]:
+        base = self._project(project)
+        git_cmd = shutil.which('git') or 'git'
+        if not (base / '.git').exists():
+            return {'is_git': False, 'current': '', 'branches': [], 'remotes': []}
+        cur_res = subprocess.run([git_cmd, 'rev-parse', '--abbrev-ref', 'HEAD'], cwd=base, capture_output=True, text=True, timeout=10)
+        current = cur_res.stdout.strip() if cur_res.returncode == 0 else ''
+        br_res = subprocess.run([git_cmd, 'branch', '--format=%(refname:short)'], cwd=base, capture_output=True, text=True, timeout=10)
+        branches = [b.strip() for b in br_res.stdout.splitlines() if b.strip()] if br_res.returncode == 0 else []
+        if current and current != 'HEAD' and current not in branches:
+            branches.insert(0, current)
+        rem_res = subprocess.run([git_cmd, 'remote'], cwd=base, capture_output=True, text=True, timeout=10)
+        remotes = [r.strip() for r in rem_res.stdout.splitlines() if r.strip()] if rem_res.returncode == 0 else []
+        return {'is_git': True, 'current': current, 'branches': branches, 'remotes': remotes}
+
+    def git_checkout(self, project: str, branch: str, create: bool = False) -> dict[str, Any]:
+        base = self._project(project)
+        b = branch.strip()
+        if not b or not BRANCH_RE.fullmatch(b) or '..' in b or b.startswith('-') or b.endswith('/'):
+            raise BridgeError('Invalid git branch name')
+        git_cmd = shutil.which('git') or 'git'
+        cmd = [git_cmd, 'checkout', '-b', b] if create else [git_cmd, 'checkout', b]
+        res = subprocess.run(cmd, cwd=base, capture_output=True, text=True, timeout=15)
+        if res.returncode != 0:
+            err = REDACTION.sub('[REDACTED]', (res.stderr or res.stdout).strip())
+            raise BridgeError(f'Git checkout failed: {err[:300]}', 422)
+        return {'success': True, 'branch': b, 'created': create}
+
+    def git_push(self, project: str, remote: str = 'origin', branch: str = '') -> dict[str, Any]:
+        base = self._project(project)
+        rem = (remote or 'origin').strip()
+        if not NAME_RE.fullmatch(rem):
+            raise BridgeError('Invalid git remote name')
+        git_cmd = shutil.which('git') or 'git'
+        target_branch = branch.strip()
+        if not target_branch:
+            cur_res = subprocess.run([git_cmd, 'rev-parse', '--abbrev-ref', 'HEAD'], cwd=base, capture_output=True, text=True, timeout=10)
+            target_branch = cur_res.stdout.strip() if cur_res.returncode == 0 else ''
+        if not target_branch or not BRANCH_RE.fullmatch(target_branch) or '..' in target_branch or target_branch.startswith('-'):
+            raise BridgeError('Invalid target branch name')
+        push_cmd = [git_cmd]
+        gh_token = os.environ.get('GITHUB_TOKEN', '').strip()
+        push_env = os.environ.copy()
+        push_env['GIT_TERMINAL_PROMPT'] = '0'
+        if gh_token:
+            import base64
+            basic = base64.b64encode(f'x-access-token:{gh_token}'.encode('utf-8')).decode('ascii')
+            push_cmd += ['-c', f'http.https://github.com/.extraheader=AUTHORIZATION: basic {basic}']
+        # Explicitly never pass --force or -f.
+        push_cmd += ['push', '-u', rem, target_branch]
+        res = subprocess.run(push_cmd, cwd=base, capture_output=True, text=True, timeout=60, env=push_env)
+        combined = REDACTION.sub('[REDACTED]', (res.stdout + '\n' + res.stderr).strip())
+        if res.returncode != 0:
+            raise BridgeError(f'Git push failed: {combined[:300]}', 422)
+        return {'success': True, 'remote': rem, 'branch': target_branch, 'output': combined[:1000]}
+
+    def git_checkpoint(self, project: str, label: str = 'apply-to-file') -> dict[str, Any]:
+        safe_label = re.sub(r'[^a-zA-Z0-9._-]', '-', label or 'manual')[:40]
+        sha = self.create_git_checkpoint(project, safe_label)
+        return {'success': True, 'sha': sha or '', 'label': safe_label}
+
+    # ---- Phase 3: Workspace Global Search & Project Management ----
+
+    def search_files(self, project: str, query: str, case_sensitive: bool = False) -> dict[str, Any]:
+        base = self._project(project).resolve()
+        q = query.strip()
+        if not q:
+            return {'query': '', 'matches': [], 'truncated': False}
+        if len(q) > 200:
+            raise BridgeError('Search query too long (max 200 chars)')
+        needle = q if case_sensitive else q.lower()
+        skip_dirs = {'.git', 'node_modules', '.next', '.gradle', '.venv', '__pycache__', 'dist', 'build'}
+        matches: list[dict[str, Any]] = []
+        truncated = False
+        for root, dirs, files in os.walk(base):
+            dirs[:] = sorted(d for d in dirs if d not in skip_dirs)
+            for fname in sorted(files):
+                if fname == '.env' or fname.startswith('.env.'):
+                    if fname != '.env.example':
+                        continue
+                fpath = Path(root) / fname
+                try:
+                    resolved = fpath.resolve()
+                    if not resolved.is_relative_to(base):
+                        continue
+                    if resolved.stat().st_size > MAX_FILE_BYTES:
+                        continue
+                    raw = resolved.read_bytes()
+                    if b'\x00' in raw[:4096]:
+                        continue
+                    text = raw.decode('utf-8', errors='replace')
+                except OSError:
+                    continue
+                rel = str(resolved.relative_to(base)).replace('\\', '/')
+                for idx, line in enumerate(text.splitlines(), start=1):
+                    hay = line if case_sensitive else line.lower()
+                    if needle in hay:
+                        snippet = REDACTION.sub('[REDACTED]', line.strip())[:200]
+                        matches.append({'file': rel, 'line': idx, 'snippet': snippet})
+                        if len(matches) >= 200:
+                            truncated = True
+                            break
+                if truncated:
+                    break
+            if truncated:
+                break
+        return {'query': q, 'matches': matches, 'truncated': truncated}
+
+    def delete_project(self, project: str) -> dict[str, Any]:
+        base = self._project(project)
+        self.stop_preview(project)
+        self.terminal_stop(project)
+        shutil.rmtree(base)
+        with self._db() as db:
+            db.execute('DELETE FROM agent_threads WHERE project=?', (project,))
+        return {'deleted': True, 'name': project}
+
+    def rename_project(self, project: str, new_name: str) -> dict[str, Any]:
+        base = self._project(project)
+        target_name = new_name.strip()
+        if not NAME_RE.fullmatch(target_name) or target_name in {'.', '..'}:
+            raise BridgeError('Invalid new project name')
+        target = self.workspaces / target_name
+        if target.exists():
+            raise BridgeError('Target project name already exists', 409)
+        self.stop_preview(project)
+        self.terminal_stop(project)
+        base.rename(target)
+        with self._db() as db:
+            db.execute('UPDATE tasks SET project=? WHERE project=?', (target_name, project))
+            db.execute('UPDATE agent_threads SET project=? WHERE project=?', (target_name, project))
+        return {'renamed': True, 'old_name': project, 'name': target_name}
+
+    # ---- Phase 3: Full Interactive Linux PTY Terminal Manager ----
+
+    def _pty_reader(self, project: str, session: dict[str, Any]):
+        master_fd = session.get('master_fd')
+        proc = session.get('process')
+        try:
+            if master_fd is not None:
+                while True:
+                    try:
+                        chunk = os.read(master_fd, 4096)
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    text = REDACTION.sub('[REDACTED]', chunk.decode('utf-8', errors='replace'))
+                    with self.lock:
+                        session['seq'] += 1
+                        session['chunks'].append((session['seq'], text))
+            elif proc is not None and proc.stdout is not None:
+                fd = proc.stdout.fileno()
+                while True:
+                    try:
+                        chunk = os.read(fd, 2048)
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    text = REDACTION.sub('[REDACTED]', chunk.decode('utf-8', errors='replace'))
+                    with self.lock:
+                        session['seq'] += 1
+                        session['chunks'].append((session['seq'], text))
+        finally:
+            if master_fd is not None:
+                try:
+                    os.close(master_fd)
+                except OSError:
+                    pass
+                session['master_fd'] = None
+
+    def terminal_start(self, project: str, cols: int = 80, rows: int = 24) -> dict[str, Any]:
+        base = self._project(project)
+        cols = max(20, min(300, int(cols)))
+        rows = max(5, min(120, int(rows)))
+        with self.lock:
+            existing = self.terminals.get(project)
+            if existing and existing['process'].poll() is None:
+                return {'running': True, 'project': project, 'cols': existing['cols'], 'rows': existing['rows'], 'pty': existing['pty'], 'seq': existing['seq']}
+        env = os.environ.copy()
+        env.update({'TERM': 'xterm-256color', 'COLUMNS': str(cols), 'LINES': str(rows)})
+        master_fd: int | None = None
+        is_pty = False
+        if os.name != 'nt':
+            try:
+                import fcntl
+                import pty
+                import termios
+                m_fd, s_fd = pty.openpty()
+                winsize = struct.pack('HHHH', rows, cols, 0, 0)
+                fcntl.ioctl(s_fd, termios.TIOCSWINSZ, winsize)
+                shell = shutil.which('bash') or shutil.which('sh') or '/bin/sh'
+                proc = subprocess.Popen(
+                    [shell, '-i'],
+                    cwd=base,
+                    env=env,
+                    stdin=s_fd,
+                    stdout=s_fd,
+                    stderr=s_fd,
+                    start_new_session=True,
+                    close_fds=True,
+                )
+                os.close(s_fd)
+                master_fd = m_fd
+                is_pty = True
+            except Exception:
+                master_fd = None
+                is_pty = False
+        if not is_pty:
+            shell_cmd = ['cmd.exe'] if os.name == 'nt' else [shutil.which('sh') or '/bin/sh']
+            proc = subprocess.Popen(
+                shell_cmd,
+                cwd=base,
+                env=env,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+        session: dict[str, Any] = {
+            'process': proc,
+            'master_fd': master_fd,
+            'pty': is_pty,
+            'cols': cols,
+            'rows': rows,
+            'seq': 0,
+            'chunks': deque(maxlen=400),
+        }
+        with self.lock:
+            self.terminals[project] = session
+        self._register_pid(f'terminal:{project}', proc, 'shell')
+        threading.Thread(target=self._pty_reader, args=(project, session), daemon=True).start()
+        return {'running': True, 'project': project, 'cols': cols, 'rows': rows, 'pty': is_pty, 'seq': 0}
+
+    def terminal_input(self, project: str, data: str) -> dict[str, Any]:
+        self._project(project)
+        with self.lock:
+            session = self.terminals.get(project)
+        if not session or session['process'].poll() is not None:
+            raise BridgeError('Terminal session is not running', 409)
+        raw = data.encode('utf-8')
+        if session.get('master_fd') is not None:
+            os.write(session['master_fd'], raw)
+        elif session['process'].stdin is not None:
+            session['process'].stdin.write(raw)
+            session['process'].stdin.flush()
+        return {'ok': True, 'bytes': len(raw)}
+
+    def terminal_poll(self, project: str, after: int = 0) -> dict[str, Any]:
+        self._project(project)
+        with self.lock:
+            session = self.terminals.get(project)
+            if not session:
+                return {'running': False, 'seq': after, 'data': ''}
+            running = session['process'].poll() is None
+            chunks = [text for seq, text in session['chunks'] if seq > after]
+            latest_seq = session['seq']
+        return {'running': running, 'seq': latest_seq, 'data': ''.join(chunks)}
+
+    def terminal_resize(self, project: str, cols: int, rows: int) -> dict[str, Any]:
+        self._project(project)
+        cols = max(20, min(300, int(cols)))
+        rows = max(5, min(120, int(rows)))
+        with self.lock:
+            session = self.terminals.get(project)
+        if not session or session['process'].poll() is not None:
+            raise BridgeError('Terminal session is not running', 409)
+        session['cols'] = cols
+        session['rows'] = rows
+        if session.get('master_fd') is not None and os.name != 'nt':
+            try:
+                import fcntl
+                import termios
+                winsize = struct.pack('HHHH', rows, cols, 0, 0)
+                fcntl.ioctl(session['master_fd'], termios.TIOCSWINSZ, winsize)
+                if hasattr(os, 'killpg'):
+                    os.killpg(os.getpgid(session['process'].pid), signal.SIGWINCH)
+            except OSError:
+                pass
+        return {'ok': True, 'cols': cols, 'rows': rows}
+
+    def terminal_stop(self, project: str) -> dict[str, Any]:
+        with self.lock:
+            session = self.terminals.pop(project, None)
+        if session:
+            self._kill(session['process'])
+            if session.get('master_fd') is not None:
+                try:
+                    os.close(session['master_fd'])
+                except OSError:
+                    pass
+                session['master_fd'] = None
+        self._unregister_pid(f'terminal:{project}')
+        return {'running': False}

@@ -30,10 +30,10 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
-    def _body(self):
+    def _body(self, max_bytes: int = 1024 * 1024):
         try: n=int(self.headers.get('Content-Length','0'))
         except ValueError:raise BridgeError('Invalid Content-Length')
-        if not 0<=n<=1024*1024:raise BridgeError('Payload must be <= 1 MiB',413)
+        if not 0<=n<=max_bytes:raise BridgeError(f'Payload must be <= {max_bytes // (1024*1024)} MiB',413)
         if n==0:return {}
         try:
             b=json.loads(self.rfile.read(n).decode('utf-8'))
@@ -87,12 +87,23 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200,self.core.cancel(tid))
         if len(seg)>=3 and seg[:2]==['v1','projects']:
             name=seg[2]
+            if len(seg)==3 and method=='DELETE':
+                return self.reply(200,self.core.delete_project(name))
+            if len(seg)==4 and seg[3]=='rename' and method=='POST':
+                obj=self._body()
+                return self.reply(200,self.core.rename_project(name,str(obj.get('new_name',''))))
+            if len(seg)==4 and seg[3]=='search' and method=='GET':
+                query_str=q.get('q',[''])[0]
+                cs=q.get('case_sensitive',['false'])[0].lower()=='true'
+                return self.reply(200,self.core.search_files(name,query_str,case_sensitive=cs))
             if len(seg)==4 and seg[3]=='files' and method=='GET':
                 return self.reply(200,{'files':self.core.list_files(name,q.get('path',['.'])[0])})
             if len(seg)==4 and seg[3]=='file':
                 rel=q.get('path',[''])[0]
                 if method=='GET':return self.reply(200,self.core.read_file(name,rel))
-                if method=='PUT':return self.reply(200,self.core.write_file(name,rel,str(self._body().get('content',''))))
+                if method=='PUT':
+                    obj=self._body()
+                    return self.reply(200,self.core.write_file(name,rel,str(obj.get('content','')),create_dirs=bool(obj.get('create_dirs',False))))
             if len(seg)==4 and seg[3]=='instructions':
                 if method=='GET':
                     return self.reply(200,self.core.project_instructions(name))
@@ -101,6 +112,9 @@ class Handler(BaseHTTPRequestHandler):
             if len(seg)==4 and seg[3]=='export' and method=='POST':
                 obj=self._body()
                 return self.reply(200,self.core.export_project(name,include_env=bool(obj.get('include_env',False))))
+            if len(seg)==4 and seg[3]=='attachments' and method=='POST':
+                obj=self._body(max_bytes=36*1024*1024)
+                return self.reply(201,self.core.save_attachment(name,str(obj.get('filename','')),str(obj.get('data_b64',''))))
             if len(seg)==4 and seg[3]=='apks' and method=='GET':
                 return self.reply(200,{'apks':self.core.list_project_apks(name)})
             if len(seg)==4 and seg[3]=='memory' and method=='GET':
@@ -120,6 +134,33 @@ class Handler(BaseHTTPRequestHandler):
                     obj=self._body()
                     target_sha=obj.get('sha')
                     return self.reply(200,self.core.git_rollback(name,str(target_sha) if target_sha else None))
+                if seg[4]=='branches' and method=='GET':
+                    return self.reply(200,self.core.git_branches(name))
+                if seg[4]=='checkout' and method=='POST':
+                    obj=self._body()
+                    return self.reply(200,self.core.git_checkout(name,str(obj.get('branch','')),create=bool(obj.get('create',False))))
+                if seg[4]=='push' and method=='POST':
+                    obj=self._body()
+                    return self.reply(200,self.core.git_push(name,str(obj.get('remote','origin')),str(obj.get('branch',''))))
+                if seg[4]=='checkpoint' and method=='POST':
+                    obj=self._body()
+                    return self.reply(200,self.core.git_checkpoint(name,str(obj.get('label','manual'))))
+            if len(seg)==5 and seg[3]=='terminal':
+                if seg[4]=='start' and method=='POST':
+                    obj=self._body()
+                    return self.reply(200,self.core.terminal_start(name,int(obj.get('cols',80)),int(obj.get('rows',24))))
+                if seg[4]=='input' and method=='POST':
+                    obj=self._body()
+                    return self.reply(200,self.core.terminal_input(name,str(obj.get('data',''))))
+                if seg[4]=='poll' and method=='GET':
+                    try: after=int(q.get('after',[0])[0])
+                    except (ValueError,TypeError): raise BridgeError('Invalid cursor')
+                    return self.reply(200,self.core.terminal_poll(name,after))
+                if seg[4]=='resize' and method=='POST':
+                    obj=self._body()
+                    return self.reply(200,self.core.terminal_resize(name,int(obj.get('cols',80)),int(obj.get('rows',24))))
+                if seg[4]=='stop' and method=='POST':
+                    return self.reply(200,self.core.terminal_stop(name))
             if len(seg)>=4 and seg[3]=='preview':
                 if len(seg)==4 and method=='GET':return self.reply(200,self.core.preview(name))
                 if len(seg)==5 and seg[4]=='start' and method=='POST':
@@ -142,6 +183,7 @@ class Handler(BaseHTTPRequestHandler):
     do_GET = _process
     do_POST = _process
     do_PUT = _process
+    do_DELETE = _process
 
 def create_server(home:Path,port:int=8765):
     bridge=LocalCore(home)

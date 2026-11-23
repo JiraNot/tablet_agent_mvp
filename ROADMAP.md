@@ -31,6 +31,12 @@ This roadmap is **evidence-based**, not a list of features declared complete bec
 | Multi-agent provider UI and runtime adapters | `[x]` | Codex, Claude Code, and OpenCode adapters implemented with capability flags and `/v1/agents` endpoint; agent & model selector integrated in Compose UI |
 | Durable foreground execution while Android sleeps | `[x]` | Android Foreground Service + WakeLock implemented in source & APK |
 | Phase Stepper Bar (Workflow visualizer) | `[x]` | 5-phase workflow stepper (Plan ➔ Execute ➔ Verify ➔ Auto-Repair ➔ Commit) integrated and verified on tablet |
+| 25 MB Binary Attachment Upload Pipeline | `[x]` | Base64 streaming into `.agents/attachments/<file>`, validated up to 25 MB, verified with unit tests and APK compile |
+| In-Chat Syntax Highlighting & Safe Apply to File | `[x]` | GitHub Markdown + colorized code blocks + 1-tap `[Copy Code]` & `[Apply to File]` with automated Git checkpointing |
+| Interactive PRoot Linux PTY Terminal | `[x]` | Linux PTY session manager (`pty.openpty()`, `termios`, `TIOCSWINSZ`) + VT100/ANSI character cell emulator with tablet toolbar |
+| Git Branch Manager & Safe GitHub Push | `[x]` | Branch switcher, branch creation, unified diff, and token-based push with force-push guard |
+| Multi-Stack Full Stack Preview & Verification | `[x]` | Auto-detection for Node/Vite, Monorepo, Python FastAPI/Flask/Django, Static HTML, live server logs ring buffer, and multi-stack verifier |
+| Release CI/CD Workflow & User Guide | `[x]` | `.github/workflows/release-android.yml` tag-release automation & `docs/USER_GUIDE.md` comprehensive developer manual |
 | Full upstream source clone, compatibility and license audit | `[!]` | Selected modules inspected through GitHub; full clones/tests pending |
 
 ## 2. Delivery sequence and acceptance gates

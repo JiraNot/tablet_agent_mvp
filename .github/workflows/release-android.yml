@@ -1,0 +1,74 @@
+name: Release Android APK
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  backend-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run Python Bridge Test Suite
+        run: python -m unittest discover -s bridge/tests -v
+
+  build-release:
+    needs: backend-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build Debug and Release APKs
+        run: |
+          cd android
+          gradle :app:assembleDebug :app:assembleRelease --no-daemon
+
+      - name: Sign Release APK if Keystore Secret Configured
+        id: sign_apk
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "Signing release APK..."
+            echo "$KEYSTORE_BASE64" | base64 -d > release.keystore
+            $ANDROID_HOME/build-tools/35.0.0/apksigner sign \
+              --ks release.keystore \
+              --ks-pass pass:"$KEYSTORE_PASSWORD" \
+              --ks-key-alias "$KEY_ALIAS" \
+              --key-pass pass:"$KEY_PASSWORD" \
+              --out android/app/build/outputs/apk/release/app-release-signed.apk \
+              android/app/build/outputs/apk/release/app-release-unsigned.apk
+            rm -f release.keystore
+            echo "SIGNED=true" >> $GITHUB_ENV
+          else
+            echo "No keystore secret found, publishing unsigned release and debug APK."
+            echo "SIGNED=false" >> $GITHUB_ENV
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          name: OmniDev Tablet ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            android/app/build/outputs/apk/debug/app-debug.apk
+            android/app/build/outputs/apk/release/*.apk

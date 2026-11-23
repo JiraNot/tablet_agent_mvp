@@ -19,7 +19,11 @@ class LocalApi(private val deviceToken: String, port: Int = 8765) {
             try {
                 conn.requestMethod = method
                 conn.connectTimeout = 3000
-                conn.readTimeout = if (path == "/v1/projects" && method == "POST") 180000 else 12000
+                conn.readTimeout = when {
+                    path == "/v1/projects" && method == "POST" -> 180000
+                    path.endsWith("/attachments") && method == "POST" -> 60000
+                    else -> 12000
+                }
                 conn.setRequestProperty("Authorization", "Bearer $deviceToken")
                 conn.setRequestProperty("Accept", "application/json")
                 if (body != null) {
@@ -69,7 +73,9 @@ class LocalApi(private val deviceToken: String, port: Int = 8765) {
     suspend fun cancelTask(taskId: String) = request("POST", "/v1/tasks/${encode(taskId)}/cancel", JSONObject())
     suspend fun files(project: String, dir: String = "."): JSONArray = request("GET", "/v1/projects/${encode(project)}/files?path=${encode(dir)}").getJSONArray("files")
     suspend fun file(project: String, path: String): JSONObject = request("GET", "/v1/projects/${encode(project)}/file?path=${encode(path)}")
-    suspend fun saveFile(project: String, path: String, text: String): JSONObject = request("PUT", "/v1/projects/${encode(project)}/file?path=${encode(path)}", JSONObject().put("content", text))
+    suspend fun saveFile(project: String, path: String, text: String, createDirs: Boolean = false): JSONObject =
+        request("PUT", "/v1/projects/${encode(project)}/file?path=${encode(path)}",
+            JSONObject().put("content", text).put("create_dirs", createDirs))
     suspend fun gitStatus(project: String): JSONObject = request("GET", "/v1/projects/${encode(project)}/git/status")
     suspend fun gitDiff(project: String): JSONObject = request("GET", "/v1/projects/${encode(project)}/git/diff")
     suspend fun gitCommit(project: String, message: String): JSONObject = request("POST", "/v1/projects/${encode(project)}/git/commit", JSONObject().put("message", message))
@@ -83,4 +89,32 @@ class LocalApi(private val deviceToken: String, port: Int = 8765) {
     suspend fun importProject(zipPath: String, name: String = ""): JSONObject = request("POST", "/v1/projects/import", JSONObject().put("zip_path", zipPath).put("name", name))
     suspend fun listApks(project: String): JSONArray = request("GET", "/v1/projects/${encode(project)}/apks").optJSONArray("apks") ?: JSONArray()
     suspend fun hermesMemory(project: String): JSONObject = request("GET", "/v1/projects/${encode(project)}/memory")
+    suspend fun uploadAttachment(project: String, filename: String, base64Data: String): JSONObject =
+        request("POST", "/v1/projects/${encode(project)}/attachments",
+            JSONObject().put("filename", filename).put("data_b64", base64Data))
+
+    // Phase 2 & 3: Project Management, Git & PTY Terminal
+    suspend fun deleteProject(project: String): JSONObject = request("DELETE", "/v1/projects/${encode(project)}")
+    suspend fun renameProject(project: String, newName: String): JSONObject = request("POST", "/v1/projects/${encode(project)}/rename", JSONObject().put("new_name", newName))
+    suspend fun searchFiles(project: String, query: String, caseSensitive: Boolean = false): JSONObject =
+        request("GET", "/v1/projects/${encode(project)}/search?q=${encode(query)}&case_sensitive=$caseSensitive")
+
+    suspend fun gitBranches(project: String): JSONObject = request("GET", "/v1/projects/${encode(project)}/git/branches")
+    suspend fun gitCheckout(project: String, branch: String, create: Boolean = false): JSONObject =
+        request("POST", "/v1/projects/${encode(project)}/git/checkout", JSONObject().put("branch", branch).put("create", create))
+    suspend fun gitPush(project: String, remote: String = "origin", branch: String = ""): JSONObject =
+        request("POST", "/v1/projects/${encode(project)}/git/push", JSONObject().put("remote", remote).put("branch", branch))
+    suspend fun gitCheckpoint(project: String, label: String = "apply-code"): JSONObject =
+        request("POST", "/v1/projects/${encode(project)}/git/checkpoint", JSONObject().put("label", label))
+
+    suspend fun terminalStart(project: String, cols: Int = 80, rows: Int = 24): JSONObject =
+        request("POST", "/v1/projects/${encode(project)}/terminal/start", JSONObject().put("cols", cols).put("rows", rows))
+    suspend fun terminalInput(project: String, data: String): JSONObject =
+        request("POST", "/v1/projects/${encode(project)}/terminal/input", JSONObject().put("data", data))
+    suspend fun terminalPoll(project: String, after: Int): JSONObject =
+        request("GET", "/v1/projects/${encode(project)}/terminal/poll?after=$after")
+    suspend fun terminalResize(project: String, cols: Int, rows: Int): JSONObject =
+        request("POST", "/v1/projects/${encode(project)}/terminal/resize", JSONObject().put("cols", cols).put("rows", rows))
+    suspend fun terminalStop(project: String): JSONObject =
+        request("POST", "/v1/projects/${encode(project)}/terminal/stop", JSONObject())
 }

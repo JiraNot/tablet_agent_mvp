@@ -7,7 +7,11 @@ OmniDev Tablet is an independently written native Android app (Kotlin + Jetpack 
 ## Highlights & Features
 
 - **Rebranded OmniDev Tablet**: Dedicated Android app with glowing 3D prism cube icon across all Android screen densities (`mdpi`, `hdpi`, `xhdpi`, `xxhdpi`, `xxxhdpi`).
-- **Quick Attachment Sheet & Media Picker**: One-tap popup sheet supporting Photos & Images (`image/*`), Video Clips (`video/*`), Documents & Code (`*/*`), and Project Workspace Files with 1-tap quick suggestion chips (`package.json`, `README.md`, `src/App.tsx`, `src/index.ts`).
+- **25 MB Binary Attachment Upload Pipeline**: One-tap popup sheet supporting Photos & Images (`image/*`), Video Clips (`video/*`), Documents & Code (`*/*`), and Workspace Files. Streams raw bytes up to 25 MB into `.agents/attachments/<file>` for agent multimodal vision analysis.
+- **In-Chat Code Syntax Highlighting & 1-Tap Apply to File**: Assistant responses render formatted Markdown with alert boxes, tables, checklists, and syntax-highlighted code (JS/TS, Python, Kotlin, JSON, HTML/CSS, Diffs) with 1-click `[Copy Code]` and `[Apply to File]` (including pre-apply Git checkpoints).
+- **Interactive PRoot Linux PTY Terminal**: Native VT100/ANSI terminal emulator tab connecting to real Linux PTY sessions (`/bin/sh`, `/bin/bash`), featuring quick command chips and tablet extra keys (`ESC`, `TAB`, `CTRL+C/D`, arrows, symbols).
+- **Git Branch Manager & Safe GitHub Push**: Inspect branches, switch branches, create feature branches, and safely push commits using encrypted `GITHUB_TOKEN` credentials with force-push protection.
+- **Multi-Stack Full Stack Support**: Automated preview detection for Next.js, Vite, React, Python FastAPI, Flask, Django, and static web apps, paired with live server logs and multi-stack verification (`npm test`, `pytest`, `unittest`).
 - **Tap-to-Speak Voice Prompt**: Integrated Google Speech Recognition (`RecognizerIntent.ACTION_RECOGNIZE_SPEECH`) supporting Thai (`th-TH`) and English (`en-US`) directly beside the composer.
 - **Aion Multi-Agent Orchestrator**: Seamless mid-conversation switching between official CLI agents (`Codex`, `Claude Code`, `Antigravity`) in a single chat thread, with cross-agent handoff context synthesis and automatic quota failover.
 - **Hermes Episodic Memory Ledger**: Persistent project knowledge base stored in `.agents/memory.md` with trackable successes, pitfalls, patterns, and interactive UI viewer.
@@ -15,6 +19,7 @@ OmniDev Tablet is an independently written native Android app (Kotlin + Jetpack 
 - **Single-Click Project Zip Export & Import**: Declarative `.zip` export and import (`POST /v1/projects/{name}/export`, `POST /v1/projects/import`) preserving Git history and SQLite logs.
 - **Embedded Zero-Termux Alpine PRoot Runtime**: Bundled Alpine Linux `aarch64` rootfs (Node.js 22, Git 2.47, Python 3.12, NPM 10) and one-click in-app installer for official OpenAI Codex CLI, Google Antigravity CLI, and Anthropic Claude Code.
 - **Durable Background Execution**: Native Android Foreground Service (`AgentForegroundService.kt`) with WakeLock and ongoing progress notification, keeping agent tasks alive through screen suspension.
+- **Official Documentation**: See [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) for complete user manual, Full Stack guide, and video walkthrough outline.
 
 ## Agent instructions and delivery plan
 

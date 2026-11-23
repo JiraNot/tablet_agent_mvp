@@ -73,4 +73,14 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(st3, 200)
         self.assertTrue(fetched['codex_proot_sandbox_bypass'])
 
+    def test_attachments_http_endpoint(self):
+        import base64
+        self.call('POST', '/v1/projects', {'name': 'demo'})
+        b64 = base64.b64encode(b'image-binary-bytes').decode('ascii')
+        st, res = self.call('POST', '/v1/projects/demo/attachments', {'filename': 'mock.png', 'data_b64': b64})
+        self.assertEqual(st, 201)
+        self.assertEqual(res['filename'], 'mock.png')
+        self.assertEqual(res['path'], '.agents/attachments/mock.png')
+        self.assertEqual(res['size_bytes'], len(b'image-binary-bytes'))
+
 if __name__=='__main__':unittest.main()

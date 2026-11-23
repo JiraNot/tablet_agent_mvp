@@ -36,6 +36,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.tabletagent.local.runtime.AllCliAuthStatus
 import com.tabletagent.local.runtime.BootstrapManager
@@ -53,6 +54,7 @@ import com.tabletagent.local.ui.AionClaudeSidebar
 import com.tabletagent.local.ui.ClaudeCodeTopBar
 import com.tabletagent.local.ui.CliOAuthDialog
 import com.tabletagent.local.ui.HermesMemoryDialog
+import com.tabletagent.local.ui.InteractivePtyTerminal
 import com.tabletagent.local.ui.OfficialCliCard
 import com.tabletagent.local.ui.PhaseStepperBar
 import com.tabletagent.local.ui.ProviderApiKeysCard
@@ -117,6 +119,7 @@ fun TabletAgentApp() {
     var eventCursor by rememberSaveable { mutableIntStateOf(0) }
     var previewUrl by remember { mutableStateOf("") }
     var previewState by remember { mutableStateOf("stopped") }
+    var previewLogs by remember { mutableStateOf<List<String>>(emptyList()) }
     var files by remember { mutableStateOf<List<JSONObject>>(emptyList()) }
     var fileDir by rememberSaveable { mutableStateOf(".") }
     var fileName by remember { mutableStateOf("") }
@@ -193,6 +196,27 @@ fun TabletAgentApp() {
                 val mem = api.hermesMemory(selectedProject)
                 hermesMemoryData = mem
                 showHermesMemoryDialog = true
+            }.onFailure { notify(it) }
+        }
+    }
+
+    val uploadAttachmentHandler: suspend (String, String) -> String? = { fname, b64 ->
+        try {
+            val res = api.uploadAttachment(selectedProject, fname, b64)
+            res.optString("path", ".agents/attachments/$fname")
+        } catch (e: Exception) {
+            notify(e)
+            null
+        }
+    }
+
+    val applyCodeHandler: (String, String) -> Unit = { path, code ->
+        scope.launch {
+            runCatching {
+                api.gitCheckpoint(selectedProject, "apply-to-file")
+                api.saveFile(selectedProject, path, code, createDirs = true)
+            }.onSuccess {
+                error = "Applied code to $path (Git checkpoint saved)"
             }.onFailure { notify(it) }
         }
     }
@@ -510,7 +534,9 @@ fun TabletAgentApp() {
                                 apks = detectedApks,
                                 onInstallApk = launchInstallApk,
                                 onExportProject = doExportProject,
-                                onViewMemory = doViewMemory
+                                onViewMemory = doViewMemory,
+                                onUploadAttachment = uploadAttachmentHandler,
+                                onApplyCode = applyCodeHandler
                             )
                             1 -> BoxWithConstraints(Modifier.fillMaxSize()) {
                                 val density = LocalDensity.current
@@ -579,7 +605,9 @@ fun TabletAgentApp() {
                                             apks = detectedApks,
                                             onInstallApk = launchInstallApk,
                                             onExportProject = doExportProject,
-                                            onViewMemory = doViewMemory
+                                            onViewMemory = doViewMemory,
+                                            onUploadAttachment = uploadAttachmentHandler,
+                                            onApplyCode = applyCodeHandler
                                         )
                                     }
 
@@ -612,21 +640,34 @@ fun TabletAgentApp() {
 
                                     Box(Modifier.weight(1f - splitRatio).fillMaxHeight()) {
                                         PreviewScreen(
-                                            previewUrl, previewState,
-                                            onStart = { scope.launch { runCatching { val p = api.previewStart(selectedProject); previewUrl = p.optString("url", ""); previewState = p.optString("status", "starting") }.onFailure { notify(it) } } },
-                                            onStop = { scope.launch { runCatching { api.previewStop(selectedProject); previewState = "stopped"; previewUrl = "" }.onFailure { notify(it) } } },
+                                            previewUrl, previewState, previewLogs,
+                                            onStart = { scope.launch { runCatching {
+                                                val p = api.previewStart(selectedProject)
+                                                previewUrl = p.optString("url", "")
+                                                previewState = p.optString("status", "starting")
+                                                val arr = p.optJSONArray("logs")
+                                                if (arr != null) previewLogs = (0 until arr.length()).map { arr.getString(it) }
+                                            }.onFailure { notify(it) } } },
+                                            onStop = { scope.launch { runCatching { api.previewStop(selectedProject); previewState = "stopped"; previewUrl = ""; previewLogs = emptyList() }.onFailure { notify(it) } } },
                                             enabled = online && selectedProject.isNotBlank()
                                         )
                                     }
                                 }
                             }
                             2 -> PreviewScreen(
-                                previewUrl, previewState,
-                                onStart = { scope.launch { runCatching { val p = api.previewStart(selectedProject); previewUrl = p.optString("url", ""); previewState = p.optString("status", "starting") }.onFailure { notify(it) } } },
-                                onStop = { scope.launch { runCatching { api.previewStop(selectedProject); previewState = "stopped"; previewUrl = "" }.onFailure { notify(it) } } },
+                                previewUrl, previewState, previewLogs,
+                                onStart = { scope.launch { runCatching {
+                                    val p = api.previewStart(selectedProject)
+                                    previewUrl = p.optString("url", "")
+                                    previewState = p.optString("status", "starting")
+                                    val arr = p.optJSONArray("logs")
+                                    if (arr != null) previewLogs = (0 until arr.length()).map { arr.getString(it) }
+                                }.onFailure { notify(it) } } },
+                                onStop = { scope.launch { runCatching { api.previewStop(selectedProject); previewState = "stopped"; previewUrl = ""; previewLogs = emptyList() }.onFailure { notify(it) } } },
                                 enabled = online && selectedProject.isNotBlank()
                             )
                             3 -> FilesScreen(files, fileDir, fileName, fileBody,
+                                project = selectedProject, api = api,
                                 onFolder = { fileDir = it; fileName = "" },
                                 onFile = { path -> scope.launch { runCatching { api.file(selectedProject, path) }
                                     .onSuccess { fileName = path; fileBody = it.optString("content", "") }
@@ -718,6 +759,10 @@ fun TabletAgentApp() {
                         }
                     },
                     notify = notify
+                )
+                5 -> InteractivePtyTerminal(
+                    project = selectedProject,
+                    api = api
                 )
             }
                     }
@@ -1215,10 +1260,11 @@ private fun AgentScreen(prompt: String, onPrompt: (String) -> Unit, mode: String
 }
 
 @Composable
-private fun PreviewScreen(url: String, status: String, onStart: () -> Unit, onStop: () -> Unit, enabled: Boolean) {
+private fun PreviewScreen(url: String, status: String, logs: List<String> = emptyList(), onStart: () -> Unit, onStop: () -> Unit, enabled: Boolean) {
     var refreshTick by remember { mutableIntStateOf(0) }
     var viewportMode by rememberSaveable { mutableStateOf("full") }
     var toolbarCollapsed by rememberSaveable { mutableStateOf(false) }
+    var showLogs by remember { mutableStateOf(false) }
 
     Column(Modifier.fillMaxSize()) {
         Surface(
@@ -1377,6 +1423,36 @@ private fun PreviewScreen(url: String, status: String, onStart: () -> Unit, onSt
                 }
             }
         }
+        if (logs.isNotEmpty()) {
+            Surface(
+                color = Color(0xFF0F172A),
+                shape = RoundedCornerShape(8.dp),
+                border = BorderStroke(1.dp, Color(0xFF1E293B)),
+                modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
+            ) {
+                Column(modifier = Modifier.padding(8.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        modifier = Modifier.fillMaxWidth().clickable { showLogs = !showLogs }
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Icon(Icons.Default.Terminal, null, tint = Color(0xFF38BDF8), modifier = Modifier.size(14.dp))
+                            Text("Dev Server Logs (${logs.size} lines)", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                        }
+                        Text(if (showLogs) "Hide" else "Show", fontSize = 10.sp, color = Color(0xFF94A3B8))
+                    }
+                    if (showLogs) {
+                        Spacer(Modifier.height(6.dp))
+                        LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 140.dp)) {
+                            items(logs.takeLast(60)) { logLine ->
+                                Text(logLine, fontSize = 10.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, color = Color(0xFFE2E8F0))
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1401,14 +1477,91 @@ private fun LocalPreview(url: String, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun FilesScreen(files: List<JSONObject>, dir: String, selected: String, body: String,
-                        onFolder: (String) -> Unit, onFile: (String) -> Unit, onEdit: (String) -> Unit, onSave: () -> Unit) {
+private fun FilesScreen(
+    files: List<JSONObject>,
+    dir: String,
+    selected: String,
+    body: String,
+    project: String = "",
+    api: LocalApi? = null,
+    onFolder: (String) -> Unit,
+    onFile: (String) -> Unit,
+    onEdit: (String) -> Unit,
+    onSave: () -> Unit
+) {
     var maskSecrets by rememberSaveable { mutableStateOf(true) }
     val isEnv = selected.substringAfterLast('/').startsWith(".env")
+    var searchQuery by rememberSaveable { mutableStateOf("") }
+    var searchResults by remember { mutableStateOf<List<JSONObject>>(emptyList()) }
+    val searchScope = rememberCoroutineScope()
 
     Column(Modifier.fillMaxSize()) {
         Text("Quick file editor", style = MaterialTheme.typography.titleMedium)
         Text("Project / $dir", style = MaterialTheme.typography.bodySmall)
+
+        if (api != null && project.isNotBlank()) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { q ->
+                        searchQuery = q
+                        if (q.isNotBlank()) {
+                            searchScope.launch {
+                                runCatching {
+                                    val res = api.searchFiles(project, q)
+                                    val arr = res.optJSONArray("matches")
+                                    searchResults = if (arr != null) (0 until arr.length()).map { arr.getJSONObject(it) } else emptyList()
+                                }
+                            }
+                        } else {
+                            searchResults = emptyList()
+                        }
+                    },
+                    placeholder = { Text("Global search in files (Grep)...", fontSize = 12.sp) },
+                    singleLine = true,
+                    leadingIcon = { Icon(Icons.Default.Search, null, Modifier.size(16.dp)) },
+                    trailingIcon = {
+                        if (searchQuery.isNotEmpty()) {
+                            IconButton(onClick = { searchQuery = ""; searchResults = emptyList() }) {
+                                Icon(Icons.Default.Close, null, Modifier.size(14.dp))
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    textStyle = MaterialTheme.typography.bodySmall
+                )
+            }
+            if (searchResults.isNotEmpty()) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth().heightIn(max = 160.dp).padding(bottom = 6.dp)
+                ) {
+                    LazyColumn(modifier = Modifier.padding(6.dp)) {
+                        items(searchResults) { match ->
+                            val f = match.optString("file")
+                            val line = match.optInt("line", 1)
+                            val snippet = match.optString("snippet")
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onFile(f) }
+                                    .padding(vertical = 3.dp),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text("$f:$line", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = MaterialTheme.colorScheme.primary)
+                                Text(snippet, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if (dir != ".") TextButton(onClick = { onFolder(dir.substringBeforeLast('/', ".").ifBlank { "." }) }) { Text("← Back") }
         LazyColumn(Modifier.weight(.4f)) {
             items(files, key = { it.optString("path") }) { f ->
@@ -1893,6 +2046,13 @@ fun GitReviewDialog(
     var diffText by remember { mutableStateOf("") }
     var commitMessage by remember { mutableStateOf("") }
     var committing by remember { mutableStateOf(false) }
+    var branches by remember { mutableStateOf<List<String>>(emptyList()) }
+    var currentBranch by remember { mutableStateOf("") }
+    var branchMenuExpanded by remember { mutableStateOf(false) }
+    var showNewBranchDialog by remember { mutableStateOf(false) }
+    var newBranchName by remember { mutableStateOf("") }
+    var showPushDialog by remember { mutableStateOf(false) }
+    var pushing by remember { mutableStateOf(false) }
 
     fun refresh() {
         loading = true
@@ -1900,8 +2060,12 @@ fun GitReviewDialog(
             try {
                 val st = api.gitStatus(project)
                 val df = api.gitDiff(project)
+                val br = api.gitBranches(project)
                 statusObj = st
                 diffText = df.optString("diff", "")
+                currentBranch = br.optString("current", st.optString("branch", "HEAD"))
+                val arr = br.optJSONArray("branches")
+                if (arr != null) branches = (0 until arr.length()).map { arr.getString(it) }
             } catch (e: Exception) {
                 notify(e)
             } finally {
@@ -1942,14 +2106,60 @@ fun GitReviewDialog(
                         shape = MaterialTheme.shapes.small,
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Text("Branch: $branch", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-                            Spacer(Modifier.weight(1f))
-                            Text(
-                                if (clean) "Clean working tree" else "$uncommittedCount uncommitted changes",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (clean) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.tertiary
-                            )
+                        Column(Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box {
+                                    FilledTonalButton(
+                                        onClick = { branchMenuExpanded = true },
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                        modifier = Modifier.height(28.dp)
+                                    ) {
+                                        Icon(Icons.Default.CallSplit, null, Modifier.size(13.dp))
+                                        Spacer(Modifier.width(4.dp))
+                                        Text(currentBranch.ifBlank { branch }, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                                    }
+                                    DropdownMenu(expanded = branchMenuExpanded, onDismissRequest = { branchMenuExpanded = false }) {
+                                        branches.forEach { bName ->
+                                            DropdownMenuItem(
+                                                text = { Text(bName, fontSize = 12.sp) },
+                                                onClick = {
+                                                    branchMenuExpanded = false
+                                                    scope.launch {
+                                                        runCatching { api.gitCheckout(project, bName) }
+                                                            .onSuccess { refresh() }
+                                                            .onFailure { notify(it) }
+                                                    }
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
+                                Spacer(Modifier.width(4.dp))
+                                IconButton(
+                                    onClick = { showNewBranchDialog = true },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(Icons.Default.Add, contentDescription = "New Branch", modifier = Modifier.size(14.dp))
+                                }
+                                Spacer(Modifier.weight(1f))
+                                FilledTonalButton(
+                                    onClick = { showPushDialog = true },
+                                    colors = ButtonDefaults.filledTonalButtonColors(containerColor = Color(0xFF1E3A8A), contentColor = Color(0xFFDBEAFE)),
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                    modifier = Modifier.height(28.dp)
+                                ) {
+                                    Icon(Icons.Default.CloudUpload, contentDescription = "Push", modifier = Modifier.size(13.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("Push", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    if (clean) "Clean working tree" else "$uncommittedCount uncommitted changes",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (clean) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.tertiary
+                                )
+                            }
                         }
                     }
 
@@ -2036,4 +2246,85 @@ fun GitReviewDialog(
             TextButton(onClick = onDismiss) { Text("Close") }
         }
     )
+
+    if (showNewBranchDialog) {
+        AlertDialog(
+            onDismissRequest = { showNewBranchDialog = false },
+            title = { Text("Create New Git Branch") },
+            text = {
+                OutlinedTextField(
+                    value = newBranchName,
+                    onValueChange = { newBranchName = it },
+                    label = { Text("Branch name") },
+                    placeholder = { Text("feature/my-new-feature") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val name = newBranchName.trim()
+                        if (name.isNotBlank()) {
+                            scope.launch {
+                                runCatching { api.gitCheckout(project, name, create = true) }
+                                    .onSuccess {
+                                        showNewBranchDialog = false
+                                        newBranchName = ""
+                                        refresh()
+                                    }
+                                    .onFailure { notify(it) }
+                            }
+                        }
+                    },
+                    enabled = newBranchName.isNotBlank()
+                ) { Text("Create & Switch") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showNewBranchDialog = false }) { Text("Cancel") }
+            }
+        )
+    }
+
+    if (showPushDialog) {
+        AlertDialog(
+            onDismissRequest = { if (!pushing) showPushDialog = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Icon(Icons.Default.CloudUpload, contentDescription = null, tint = Color(0xFF2563EB))
+                    Text("Push Branch to GitHub")
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("Branch: ${currentBranch.ifBlank { "HEAD" }} -> origin", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    Text("Pushes strictly with your GITHUB_TOKEN over secure loopback authorization. Force-push is disabled.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        pushing = true
+                        scope.launch {
+                            try {
+                                val res = api.gitPush(project, "origin", currentBranch)
+                                showPushDialog = false
+                                notify(Throwable("Pushed successfully: ${res.optString("branch")}"))
+                            } catch (e: Exception) {
+                                notify(e)
+                            } finally {
+                                pushing = false
+                            }
+                        }
+                    },
+                    enabled = !pushing
+                ) {
+                    Text(if (pushing) "Pushing…" else "Confirm Push")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showPushDialog = false }, enabled = !pushing) { Text("Cancel") }
+            }
+        )
+    }
 }
