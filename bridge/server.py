@@ -150,7 +150,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply(200,self.core.git_checkout(name,str(obj.get('branch','')),create=bool(obj.get('create',False))))
                 if seg[4]=='push' and method=='POST':
                     obj=self._body()
-                    return self.reply(200,self.core.git_push(name,str(obj.get('remote','origin')),str(obj.get('branch',''))))
+                    return self.reply(200,self.core.git_push(name,str(obj.get('remote','origin')),str(obj.get('branch','')),token=str(obj.get('token',''))))
                 if seg[4]=='create-and-push' and method=='POST':
                     obj=self._body()
                     return self.reply(200,self.core.git_create_and_push(name,repo_name=str(obj.get('repo_name','')),is_private=bool(obj.get('private',True)),description=str(obj.get('description','')),token=str(obj.get('token',''))))

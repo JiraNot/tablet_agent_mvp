@@ -102,8 +102,8 @@ class LocalApi(private val deviceToken: String, port: Int = 8765) {
     suspend fun gitBranches(project: String): JSONObject = request("GET", "/v1/projects/${encode(project)}/git/branches")
     suspend fun gitCheckout(project: String, branch: String, create: Boolean = false): JSONObject =
         request("POST", "/v1/projects/${encode(project)}/git/checkout", JSONObject().put("branch", branch).put("create", create))
-    suspend fun gitPush(project: String, remote: String = "origin", branch: String = ""): JSONObject =
-        request("POST", "/v1/projects/${encode(project)}/git/push", JSONObject().put("remote", remote).put("branch", branch))
+    suspend fun gitPush(project: String, remote: String = "origin", branch: String = "", token: String = ""): JSONObject =
+        request("POST", "/v1/projects/${encode(project)}/git/push", JSONObject().put("remote", remote).put("branch", branch).put("token", token))
     suspend fun gitCreateAndPush(project: String, repoName: String = "", isPrivate: Boolean = true, description: String = "", token: String = ""): JSONObject =
         request("POST", "/v1/projects/${encode(project)}/git/create-and-push", JSONObject().put("repo_name", repoName).put("private", isPrivate).put("description", description).put("token", token))
     suspend fun gitPull(project: String, remote: String = "origin", branch: String = "", token: String = ""): JSONObject =

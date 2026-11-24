@@ -897,8 +897,10 @@ fun TabletAgentApp() {
         LaunchedEffect(dialogTab, ghSignedIn) {
             if (dialogTab == 0 && ghSignedIn) {
                 loadingRepos = true
+                cloneError = ""
                 CliAuthManager.fetchGitHubUserRepos(context)
                     .onSuccess { userRepos = it }
+                    .onFailure { cloneError = it.message ?: "Failed to fetch GitHub repos" }
                 loadingRepos = false
             }
         }
@@ -3596,7 +3598,7 @@ fun GitReviewDialog(
                                     HapticFeedbackHelper.vibrateSuccess(ctx)
                                     notify(Throwable("Created & Pushed: ${res.optString("html_url", res.optString("repo_name"))}"))
                                 } else {
-                                    val res = api.gitPush(project, "origin", currentBranch)
+                                    val res = api.gitPush(project, "origin", currentBranch, token = ghToken)
                                     showPushDialog = false
                                     refresh()
                                     HapticFeedbackHelper.vibrateSuccess(ctx)

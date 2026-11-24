@@ -47,6 +47,7 @@ DESTRUCTIVE_CMD_RE = re.compile(
 REDACTION = re.compile(
     r'(sk-(?:ant-|proj-)?[A-Za-z0-9_\-]{12,}'
     r'|gh[pousr]_[A-Za-z0-9]{16,}'
+    r'|github_pat_[A-Za-z0-9_]{50,}'
     r'|AIza[A-Za-z0-9_\-]{20,}'
     r'|Bearer\s+[A-Za-z0-9._\-]{12,}'
     r'|(?:OPENAI|ANTHROPIC|GEMINI|GOOGLE|GITHUB|GH|AWS|STRIPE|DATABASE|[A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|API_KEY))[A-Z0-9_]*\s*=\s*["\']?[^\s"\'\n]{4,})'
@@ -2283,7 +2284,7 @@ class LocalCore:
             raise BridgeError(f'Git checkout failed: {err[:300]}', 422)
         return {'success': True, 'branch': b, 'created': create}
 
-    def git_push(self, project: str, remote: str = 'origin', branch: str = '') -> dict[str, Any]:
+    def git_push(self, project: str, remote: str = 'origin', branch: str = '', token: str = '') -> dict[str, Any]:
         base = self._project(project)
         rem = (remote or 'origin').strip()
         if not NAME_RE.fullmatch(rem):
@@ -2296,7 +2297,7 @@ class LocalCore:
         if not target_branch or not BRANCH_RE.fullmatch(target_branch) or '..' in target_branch or target_branch.startswith('-'):
             raise BridgeError('Invalid target branch name')
         push_cmd = [git_cmd]
-        gh_token = os.environ.get('GITHUB_TOKEN', '').strip()
+        gh_token = (token or '').strip() or os.environ.get('GITHUB_TOKEN', '').strip()
         push_env = os.environ.copy()
         push_env['GIT_TERMINAL_PROMPT'] = '0'
         if gh_token:
@@ -3151,7 +3152,7 @@ class LocalCore:
 
         secret_patterns = [
             (re.compile(r'sk-(?:ant-|proj-)?[A-Za-z0-9_\-]{20,}'), 'API Key Detected', 'Exposing API keys in code commits creates severe security liabilities.'),
-            (re.compile(r'gh[pousr]_[A-Za-z0-9]{20,}'), 'GitHub Token Detected', 'GitHub credentials should never be committed into source files.'),
+            (re.compile(r'(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{40,})'), 'GitHub Token Detected', 'GitHub credentials should never be committed into source files.'),
             (re.compile(r'AIza[A-Za-z0-9_\-]{20,}'), 'Google / Gemini Key Detected', 'API keys must be loaded from .env and kept in SecureSecrets.'),
             (re.compile(r'(?:password|secret|passwd)\s*=\s*[\'"][^\'"]{6,}[\'"]', re.I), 'Hardcoded Password Detected', 'Passwords should not be hardcoded in application source.')
         ]

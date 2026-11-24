@@ -217,5 +217,17 @@ class GitTests(unittest.TestCase):
             self.core.create_project('proj_private', 'https://github.com/nonexistent-user-12345/private-repo-67890.git')
         self.assertIn('Repository not found or private', str(ctx.exception))
 
+    def test_git_push_token_and_fine_grained_token_redaction(self):
+        # Invalid remote should fail cleanly
+        with self.assertRaises(BridgeError):
+            self.core.git_push('testgit', remote='invalid remote name;', token='github_pat_11ABCD1234567890')
+
+        # Test fine-grained PAT redaction
+        from core import REDACTION
+        raw_msg = "Error connecting to https://github.com with token github_pat_11ABCDE1234567890_abcdefghijklmnopqrstuvwxyz012345678901234567890"
+        redacted = REDACTION.sub('[REDACTED]', raw_msg)
+        self.assertNotIn('github_pat_', redacted)
+        self.assertIn('[REDACTED]', redacted)
+
 if __name__ == '__main__':
     unittest.main()
