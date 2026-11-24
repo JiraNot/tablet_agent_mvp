@@ -66,6 +66,14 @@ import com.tabletagent.local.ui.PhaseStepperBar
 import com.tabletagent.local.ui.ProviderApiKeysCard
 import com.tabletagent.local.ui.aionClaudeDarkScheme
 import com.tabletagent.local.ui.aionClaudeLightScheme
+import com.tabletagent.local.runtime.NetworkMonitor
+import com.tabletagent.local.ui.StylusDrawingOverlay
+import com.tabletagent.local.ui.InspectElementBottomSheet
+import com.tabletagent.local.ui.InspectorJsHelper
+import com.tabletagent.local.ui.InspectedElement
+import com.tabletagent.local.ui.KeyboardAccessoryBar
+import com.tabletagent.local.ui.StarterTemplatesDialog
+import com.tabletagent.local.ui.SecurityAuditDialog
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -84,6 +92,7 @@ class MainActivity : ComponentActivity() {
         if (!initToken.isNullOrBlank()) {
             SecureDeviceToken.save(this, initToken)
         }
+        NetworkMonitor.start(this)
         setContent { MaterialTheme(colorScheme = lightColorScheme()) { TabletAgentApp() } }
     }
 
@@ -137,6 +146,10 @@ fun TabletAgentApp() {
         }
     }
     var createDialog by remember { mutableStateOf(false) }
+    var showTemplatesDialog by remember { mutableStateOf(false) }
+    var isLaunchingTemplate by remember { mutableStateOf(false) }
+    val isInternetConnected by NetworkMonitor.isOnline.collectAsState()
+    var previousCloudAgent by rememberSaveable { mutableStateOf("codex") }
     var gitReviewDialog by remember { mutableStateOf(false) }
     var showSlmManagerDialog by remember { mutableStateOf(false) }
     var pickerExpanded by remember { mutableStateOf(false) }
@@ -145,6 +158,21 @@ fun TabletAgentApp() {
     var availableAgents by remember { mutableStateOf<List<JSONObject>>(emptyList()) }
     var selectedAgent by rememberSaveable { mutableStateOf("codex") }
     var selectedModel by rememberSaveable { mutableStateOf("default") }
+
+    LaunchedEffect(isInternetConnected) {
+        if (!isInternetConnected) {
+            if (selectedAgent != "local_slm") {
+                previousCloudAgent = selectedAgent
+                selectedAgent = "local_slm"
+                selectedModel = "qwen2.5-coder-1.5b"
+            }
+        } else {
+            if (selectedAgent == "local_slm" && previousCloudAgent != "local_slm") {
+                selectedAgent = previousCloudAgent
+                selectedModel = "default"
+            }
+        }
+    }
     var tokenEntry by remember { mutableStateOf(token) }
     val bootstrapStatus by BootstrapManager.status.collectAsState()
     val isRuntimeReady = remember(bootstrapStatus) { BootstrapManager.isReady(context) }
@@ -417,6 +445,7 @@ fun TabletAgentApp() {
                             events = emptyList(); eventCursor = 0; fileDir = "."; fileName = ""
                         },
                         onNewProject = { createDialog = true },
+                        onOpenTemplates = { showTemplatesDialog = true },
                         tasks = tasks,
                         selectedTask = selectedTask,
                         isNewChatMode = isNewChatMode,
@@ -491,7 +520,8 @@ fun TabletAgentApp() {
                             scope.launch {
                                 cloningProject = true
                                 error = if (gitUrl.isNotBlank()) "Cloning $gitUrl into $name…" else "Creating workspace $name…"
-                                runCatching { api.createProject(name.trim(), gitUrl.trim()) }
+                                val ghToken = SecureSecrets.getKey(context, SecureSecrets.KEY_GITHUB)
+                                runCatching { api.createProject(name.trim(), gitUrl.trim(), ghToken) }
                                     .onSuccess {
                                         val projArr = api.projects()
                                         lastProjectsRaw = projArr.toString()
@@ -675,7 +705,23 @@ fun TabletAgentApp() {
 
                                     Box(Modifier.weight(1f - splitRatio).fillMaxHeight()) {
                                         PreviewScreen(
-                                            previewUrl, previewState, previewLogs,
+                                            url = previewUrl, status = previewState, logs = previewLogs,
+                                            project = selectedProject, api = api,
+                                            onSendPromptWithSketch = { instr, b64 ->
+                                                tab = 0
+                                                prompt = instr
+                                                scope.launch {
+                                                    runCatching {
+                                                        val fn = "sketch_${System.currentTimeMillis()}.jpg"
+                                                        api.saveAttachment(selectedProject, fn, b64)
+                                                        prompt = "Attached sketch annotation ($fn):\n$instr"
+                                                    }
+                                                }
+                                            },
+                                            onSendPromptWithInspect = { instr ->
+                                                tab = 0
+                                                prompt = instr
+                                            },
                                             onStart = { scope.launch { runCatching {
                                                 val p = api.previewStart(selectedProject)
                                                 previewUrl = p.optString("url", "")
@@ -690,7 +736,23 @@ fun TabletAgentApp() {
                                 }
                             }
                             2 -> PreviewScreen(
-                                previewUrl, previewState, previewLogs,
+                                url = previewUrl, status = previewState, logs = previewLogs,
+                                project = selectedProject, api = api,
+                                onSendPromptWithSketch = { instr, b64 ->
+                                    tab = 0
+                                    prompt = instr
+                                    scope.launch {
+                                        runCatching {
+                                            val fn = "sketch_${System.currentTimeMillis()}.jpg"
+                                            api.saveAttachment(selectedProject, fn, b64)
+                                            prompt = "Attached sketch annotation ($fn):\n$instr"
+                                        }
+                                    }
+                                },
+                                onSendPromptWithInspect = { instr ->
+                                    tab = 0
+                                    prompt = instr
+                                },
                                 onStart = { scope.launch { runCatching {
                                     val p = api.previewStart(selectedProject)
                                     previewUrl = p.optString("url", "")
@@ -828,6 +890,8 @@ fun TabletAgentApp() {
         var userRepos by remember { mutableStateOf<List<com.tabletagent.local.runtime.GitHubRepoItem>>(emptyList()) }
         var loadingRepos by remember { mutableStateOf(false) }
         var repoSearch by remember { mutableStateOf("") }
+        var isCloning by remember { mutableStateOf(false) }
+        var cloneError by remember { mutableStateOf("") }
         val ghSignedIn = cliAuthStatus.github.signedIn
 
         LaunchedEffect(dialogTab, ghSignedIn) {
@@ -922,23 +986,49 @@ fun TabletAgentApp() {
                             }
                         }
                     } else {
+                        if (cloneError.isNotBlank()) {
+                            Surface(
+                                color = MaterialTheme.colorScheme.errorContainer,
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(10.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(Icons.Default.ErrorOutline, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(20.dp))
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(
+                                        cloneError,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onErrorContainer,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
+                            }
+                        }
                         OutlinedTextField(
                             value = gitUrl,
                             onValueChange = { url ->
                                 gitUrl = url
-                                val derived = url.trim().removeSuffix("/").removeSuffix(".git").substringAfterLast('/')
-                                if (derived.isNotBlank() && !derived.contains("github.com")) {
+                                cloneError = ""
+                                val clean = url.trim().removeSuffix("/").removeSuffix(".git")
+                                val derived = clean.substringAfterLast('/')
+                                if (derived.isNotBlank() && !derived.contains("github.com") && !derived.contains(':')) {
                                     name = derived.replace(Regex("[^a-zA-Z0-9._-]"), "_")
                                 }
                             },
-                            label = { Text("GitHub HTTPS URL (leave blank for new project)") },
-                            placeholder = { Text("https://github.com/owner/repo.git") },
+                            label = { Text("GitHub Repository URL or owner/repo") },
+                            placeholder = { Text("https://github.com/owner/repo or owner/repo") },
                             maxLines = 2,
                             modifier = Modifier.fillMaxWidth()
                         )
                         OutlinedTextField(
                             value = name,
-                            onValueChange = { name = it },
+                            onValueChange = { input ->
+                                cloneError = ""
+                                name = input.replace(' ', '-').replace(Regex("[^a-zA-Z0-9._-]"), "_")
+                            },
                             label = { Text("Project folder name") },
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth()
@@ -951,22 +1041,59 @@ fun TabletAgentApp() {
                     Button(
                         onClick = {
                             scope.launch {
-                                runCatching { api.createProject(name.trim(), gitUrl.trim()) }
+                                isCloning = true
+                                cloneError = ""
+                                val ghToken = SecureSecrets.getKey(context, SecureSecrets.KEY_GITHUB)
+                                runCatching { api.createProject(name.trim(), gitUrl.trim(), ghToken) }
                                     .onSuccess {
                                         selectedProject = name.trim()
                                         createDialog = false
                                         projects = api.projects().objects()
                                     }
-                                    .onFailure { notify(it) }
+                                    .onFailure { err ->
+                                        cloneError = err.message ?: "Failed to create or clone project"
+                                        notify(err)
+                                    }
+                                isCloning = false
                             }
                         },
-                        enabled = name.isNotBlank()
+                        enabled = name.isNotBlank() && !isCloning
                     ) {
-                        Text(if (gitUrl.isNotBlank()) "Clone & Open" else "Create Project")
+                        if (isCloning) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
+                            Spacer(Modifier.width(8.dp))
+                            Text(if (gitUrl.isNotBlank()) "Cloning…" else "Creating…")
+                        } else {
+                            Text(if (gitUrl.isNotBlank()) "Clone & Open" else "Create Project")
+                        }
                     }
                 }
             },
-            dismissButton = { TextButton(onClick = { createDialog = false }) { Text("Cancel") } }
+            dismissButton = { TextButton(onClick = { createDialog = false }, enabled = !isCloning) { Text("Cancel") } }
+        )
+    }
+    if (showTemplatesDialog) {
+        StarterTemplatesDialog(
+            onDismiss = { showTemplatesDialog = false },
+            isCreating = isLaunchingTemplate,
+            onLaunchTemplate = { tName, tmplId ->
+                scope.launch {
+                    isLaunchingTemplate = true
+                    runCatching {
+                        api.initTemplate(tName, tmplId)
+                    }.onSuccess {
+                        showTemplatesDialog = false
+                        val projArr = api.projects()
+                        projects = projArr.objects()
+                        selectedProject = tName
+                        selectedTask = ""
+                        events = emptyList()
+                        runCatching { api.previewStart(tName) }
+                        error = "Initialized template $tmplId for $tName"
+                    }.onFailure { notify(it) }
+                    isLaunchingTemplate = false
+                }
+            }
         )
     }
     if (gitReviewDialog && selectedProject.isNotBlank()) {
@@ -975,7 +1102,11 @@ fun TabletAgentApp() {
             api = api,
             onDismiss = { gitReviewDialog = false },
             onCommitted = { error = "Changes committed locally" },
-            notify = notify
+            notify = notify,
+            onAutoFixPrompt = { fixPrompt ->
+                tab = 0
+                prompt = fixPrompt
+            }
         )
     }
     if (showHermesMemoryDialog && selectedProject.isNotBlank()) {
@@ -1304,11 +1435,32 @@ private fun AgentScreen(prompt: String, onPrompt: (String) -> Unit, mode: String
 }
 
 @Composable
-private fun PreviewScreen(url: String, status: String, logs: List<String> = emptyList(), onStart: () -> Unit, onStop: () -> Unit, enabled: Boolean) {
+private fun PreviewScreen(
+    url: String,
+    status: String,
+    logs: List<String> = emptyList(),
+    project: String = "",
+    api: LocalApi? = null,
+    onStart: () -> Unit,
+    onStop: () -> Unit,
+    onSendPromptWithSketch: ((instruction: String, imageB64: String) -> Unit)? = null,
+    onSendPromptWithInspect: ((instruction: String) -> Unit)? = null,
+    enabled: Boolean
+) {
     var refreshTick by remember { mutableIntStateOf(0) }
     var viewportMode by rememberSaveable { mutableStateOf("full") }
     var toolbarCollapsed by rememberSaveable { mutableStateOf(false) }
     var showLogs by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+
+    // Super Suite: Stylus, Inspector, and PWA Export states
+    var isDrawingMode by remember { mutableStateOf(false) }
+    var isInspectMode by remember { mutableStateOf(false) }
+    var inspectedElement by remember { mutableStateOf<InspectedElement?>(null) }
+    var webViewRef by remember { mutableStateOf<WebView?>(null) }
+    var showPwaSuccessDialog by remember { mutableStateOf(false) }
+    var isConfiguringPwa by remember { mutableStateOf(false) }
 
     Column(Modifier.fillMaxSize()) {
         Surface(
@@ -1367,6 +1519,69 @@ private fun PreviewScreen(url: String, status: String, logs: List<String> = empt
                     Icon(Icons.Default.Refresh, contentDescription = "Reload", modifier = Modifier.size(16.dp))
                 }
 
+                // Super Suite 1: Stylus Drawing Mode Button
+                FilledTonalIconButton(
+                    onClick = {
+                        isDrawingMode = !isDrawingMode
+                        if (isDrawingMode) isInspectMode = false
+                    },
+                    enabled = url.isNotBlank(),
+                    colors = IconButtonDefaults.filledTonalIconButtonColors(
+                        containerColor = if (isDrawingMode) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
+                        contentColor = if (isDrawingMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                    ),
+                    modifier = Modifier.size(30.dp)
+                ) {
+                    Icon(Icons.Default.Draw, contentDescription = "Draw on Preview", modifier = Modifier.size(16.dp))
+                }
+
+                Spacer(Modifier.width(2.dp))
+
+                // Super Suite 2: Click-to-Inspect Mode Button
+                FilledTonalIconButton(
+                    onClick = {
+                        isInspectMode = !isInspectMode
+                        if (isInspectMode) isDrawingMode = false
+                        webViewRef?.evaluateJavascript(
+                            if (isInspectMode) InspectorJsHelper.INJECT_INSPECTOR_SCRIPT else InspectorJsHelper.REMOVE_INSPECTOR_SCRIPT,
+                            null
+                        )
+                    },
+                    enabled = url.isNotBlank(),
+                    colors = IconButtonDefaults.filledTonalIconButtonColors(
+                        containerColor = if (isInspectMode) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
+                        contentColor = if (isInspectMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                    ),
+                    modifier = Modifier.size(30.dp)
+                ) {
+                    Icon(Icons.Default.FindInPage, contentDescription = "Click to Inspect", modifier = Modifier.size(16.dp))
+                }
+
+                Spacer(Modifier.width(2.dp))
+
+                // Super Suite 7: 1-Click PWA Fullscreen Exporter Button
+                IconButton(
+                    onClick = {
+                        scope.launch {
+                            isConfiguringPwa = true
+                            runCatching {
+                                api?.pwaConfigure(project)
+                            }.onSuccess {
+                                showPwaSuccessDialog = true
+                            }
+                            isConfiguringPwa = false
+                        }
+                    },
+                    enabled = url.isNotBlank() && !isConfiguringPwa,
+                    modifier = Modifier.size(30.dp)
+                ) {
+                    if (isConfiguringPwa) {
+                        CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                    } else {
+                        Icon(Icons.Default.InstallMobile, contentDescription = "Export as PWA", modifier = Modifier.size(16.dp))
+                    }
+                }
+
                 if (!toolbarCollapsed) {
                     Spacer(Modifier.width(6.dp))
                     Text(
@@ -1381,7 +1596,7 @@ private fun PreviewScreen(url: String, status: String, logs: List<String> = empt
                     Spacer(Modifier.weight(1f))
                 }
 
-                // Tight Grouped Responsive Viewport Icon Pill [ Desktop | Tablet | Phone ]
+                // Responsive Viewport Icon Pill
                 Surface(
                     color = MaterialTheme.colorScheme.surface,
                     shape = RoundedCornerShape(8.dp),
@@ -1418,7 +1633,7 @@ private fun PreviewScreen(url: String, status: String, logs: List<String> = empt
 
                 Spacer(Modifier.width(4.dp))
 
-                // Collapse / Expand URL details toggle
+                // Collapse / Expand toggle
                 IconButton(
                     onClick = { toolbarCollapsed = !toolbarCollapsed },
                     modifier = Modifier.size(28.dp)
@@ -1440,7 +1655,47 @@ private fun PreviewScreen(url: String, status: String, logs: List<String> = empt
                     "mobile" -> Modifier.width(375.dp).fillMaxHeight()
                     else -> Modifier.fillMaxSize()
                 }
-                key(url, refreshTick) { LocalPreview(url, previewMod) }
+                key(url, refreshTick) {
+                    LocalPreview(
+                        url = url,
+                        modifier = previewMod,
+                        onWebViewCreated = { wv ->
+                            webViewRef = wv
+                            wv.webChromeClient = object : android.webkit.WebChromeClient() {
+                                override fun onConsoleMessage(consoleMessage: android.webkit.ConsoleMessage?): Boolean {
+                                    val msg = consoleMessage?.message() ?: return false
+                                    if (msg.startsWith("__OMNI_INSPECT__:")) {
+                                        val jsonStr = msg.removePrefix("__OMNI_INSPECT__:")
+                                        runCatching {
+                                            val obj = JSONObject(jsonStr)
+                                            inspectedElement = InspectedElement(
+                                                tag = obj.optString("tag", ""),
+                                                id = obj.optString("id", ""),
+                                                classes = obj.optString("classes", ""),
+                                                htmlSnippet = obj.optString("htmlSnippet", ""),
+                                                computedText = obj.optString("computedText", "")
+                                            )
+                                        }
+                                        return true
+                                    }
+                                    return super.onConsoleMessage(consoleMessage)
+                                }
+                            }
+                        }
+                    )
+                }
+
+                // Super Suite 1: Stylus Drawing Canvas Overlay
+                if (isDrawingMode) {
+                    StylusDrawingOverlay(
+                        targetView = webViewRef,
+                        onCancel = { isDrawingMode = false },
+                        onApplySketch = { b64, instruction ->
+                            isDrawingMode = false
+                            onSendPromptWithSketch?.invoke(instruction, b64)
+                        }
+                    )
+                }
             }
         } else {
             Surface(
@@ -1466,6 +1721,44 @@ private fun PreviewScreen(url: String, status: String, logs: List<String> = empt
                     Text("Tap ▶ above to start npm run dev", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
+        }
+
+        // Super Suite 2: Bottom Sheet for Inspected Element
+        if (inspectedElement != null) {
+            InspectElementBottomSheet(
+                element = inspectedElement,
+                onDismiss = { inspectedElement = null },
+                onModifyWithAi = { instruction ->
+                    onSendPromptWithInspect?.invoke(instruction)
+                }
+            )
+        }
+
+        // Super Suite 7: PWA Configured Dialog
+        if (showPwaSuccessDialog) {
+            AlertDialog(
+                onDismissRequest = { showPwaSuccessDialog = false },
+                icon = { Icon(Icons.Default.InstallMobile, null, tint = MaterialTheme.colorScheme.primary) },
+                title = { Text("PWA Configured") },
+                text = {
+                    Text("manifest.json and service worker caching are installed in public/. You can launch and install this app as a standalone fullscreen PWA on your tablet.")
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            showPwaSuccessDialog = false
+                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            context.startActivity(intent)
+                        }
+                    ) {
+                        Text("Open Fullscreen")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showPwaSuccessDialog = false }) { Text("Close") }
+                }
+            )
         }
         if (logs.isNotEmpty()) {
             Surface(
@@ -1502,7 +1795,11 @@ private fun PreviewScreen(url: String, status: String, logs: List<String> = empt
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
-private fun LocalPreview(url: String, modifier: Modifier = Modifier) {
+private fun LocalPreview(
+    url: String,
+    modifier: Modifier = Modifier,
+    onWebViewCreated: ((WebView) -> Unit)? = null
+) {
     AndroidView(modifier = modifier, factory = { context ->
         WebView(context).apply {
             settings.javaScriptEnabled = true
@@ -1515,8 +1812,11 @@ private fun LocalPreview(url: String, modifier: Modifier = Modifier) {
                     return host != "127.0.0.1" && host != "localhost"
                 }
             }
+            onWebViewCreated?.invoke(this)
             loadUrl(url)
         }
+    }, update = { wv ->
+        onWebViewCreated?.invoke(wv)
     })
 }
 
@@ -1842,7 +2142,15 @@ private fun FilesScreen(
                         },
                         filePath = activeTab,
                         readOnly = isEnv && maskSecrets,
-                        modifier = Modifier.fillMaxSize()
+                        modifier = Modifier.weight(1f).fillMaxWidth()
+                    )
+                    KeyboardAccessoryBar(
+                        onInsertText = { insertText ->
+                            val current = tabBodies[activeTab] ?: body
+                            val updated = current + insertText
+                            tabBodies[activeTab] = updated
+                            if (activeTab == selected) onEdit(updated)
+                        }
                     )
                 }
             } else {
@@ -2326,7 +2634,8 @@ fun GitReviewDialog(
     api: LocalApi,
     onDismiss: () -> Unit,
     onCommitted: () -> Unit,
-    notify: (Throwable) -> Unit
+    notify: (Throwable) -> Unit,
+    onAutoFixPrompt: ((String) -> Unit)? = null
 ) {
     val scope = rememberCoroutineScope()
     var selectedTab by remember { mutableStateOf(0) } // 0: Changes, 1: Branches & Sync, 2: History, 3: Worktrees
@@ -2341,6 +2650,9 @@ fun GitReviewDialog(
     var currentBranch by remember { mutableStateOf("") }
     var showNewBranchDialog by remember { mutableStateOf(false) }
     var newBranchName by remember { mutableStateOf("") }
+    var showAuditDialog by remember { mutableStateOf(false) }
+    var auditLoading by remember { mutableStateOf(false) }
+    var auditResult by remember { mutableStateOf<JSONObject?>(null) }
     var showPushDialog by remember { mutableStateOf(false) }
     var pushing by remember { mutableStateOf(false) }
     var pulling by remember { mutableStateOf(false) }
@@ -2537,7 +2849,25 @@ fun GitReviewDialog(
                                         Text(if (aiGenerating) "Generating…" else "✨ AI Auto-Commit Msg", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                                     }
 
-                                    if (!clean) {
+                                    FilledTonalButton(
+                                    onClick = {
+                                        showAuditDialog = true
+                                        auditLoading = true
+                                        scope.launch {
+                                            runCatching { api.gitAudit(project) }
+                                                .onSuccess { auditResult = it }
+                                                .onFailure { notify(it) }
+                                            auditLoading = false
+                                        }
+                                    },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Icon(Icons.Default.Security, null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("🛡️ Run AI Pre-Commit & Security Audit")
+                                }
+
+                                if (!clean) {
                                         OutlinedButton(
                                             onClick = { showDiscardAllConfirm = true },
                                             colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFEF4444)),
@@ -2641,6 +2971,24 @@ fun GitReviewDialog(
                                             )
                                         }
                                     }
+                                }
+
+                                FilledTonalButton(
+                                    onClick = {
+                                        showAuditDialog = true
+                                        auditLoading = true
+                                        scope.launch {
+                                            runCatching { api.gitAudit(project) }
+                                                .onSuccess { auditResult = it }
+                                                .onFailure { notify(it) }
+                                            auditLoading = false
+                                        }
+                                    },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Icon(Icons.Default.Security, null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("🛡️ Run AI Pre-Commit & Security Audit")
                                 }
 
                                 if (!clean) {
@@ -3421,6 +3769,20 @@ fun GitReviewDialog(
             },
             dismissButton = {
                 TextButton(onClick = { showPrSuccessDialog = false }) { Text("Done") }
+            }
+        )
+    }
+
+    if (showAuditDialog) {
+        SecurityAuditDialog(
+            project = project,
+            auditResult = auditResult,
+            loading = auditLoading,
+            onDismiss = { showAuditDialog = false },
+            onAutoFixWithAi = { fixPrompt ->
+                showAuditDialog = false
+                onDismiss()
+                onAutoFixPrompt?.invoke(fixPrompt)
             }
         )
     }

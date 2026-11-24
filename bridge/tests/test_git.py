@@ -203,5 +203,19 @@ class GitTests(unittest.TestCase):
         self.assertFalse(st_after['has_conflicts'])
         self.assertTrue(st_after['clean'])
 
+    def test_create_project_git_clone_url_normalization_and_token(self):
+        # Invalid project name
+        with self.assertRaises(BridgeError):
+            self.core.create_project('invalid name with spaces', 'octocat/Hello-World')
+
+        # Invalid URLs
+        with self.assertRaises(BridgeError):
+            self.core.create_project('proj_bad_url', 'https://malicious.com/repo.git')
+
+        # Helpful error on private repo without token
+        with self.assertRaises(BridgeError) as ctx:
+            self.core.create_project('proj_private', 'https://github.com/nonexistent-user-12345/private-repo-67890.git')
+        self.assertIn('Repository not found or private', str(ctx.exception))
+
 if __name__ == '__main__':
     unittest.main()

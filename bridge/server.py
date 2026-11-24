@@ -56,10 +56,13 @@ class Handler(BaseHTTPRequestHandler):
         if seg==['v1','projects']:
             if method=='GET':return self.reply(200,{'projects':self.core.projects()})
             if method=='POST':
-                obj=self._body();return self.reply(201,self.core.create_project(str(obj.get('name','')),str(obj.get('git_url',''))))
+                obj=self._body();return self.reply(201,self.core.create_project(str(obj.get('name','')),str(obj.get('git_url','')),str(obj.get('token',''))))
         if seg==['v1','projects','import'] and method=='POST':
             obj=self._body()
             return self.reply(201,self.core.import_project(str(obj.get('zip_path','')), str(obj.get('name','')) or None))
+        if seg==['v1','templates','init'] and method=='POST':
+            obj=self._body()
+            return self.reply(201,self.core.templates_init(str(obj.get('project','')), str(obj.get('template_id','react_vite'))))
         if seg==['v1','agents'] and method=='GET':
             return self.reply(200,{'agents':self.core.available_agents()})
         if seg==['v1','slm','status'] and method=='GET':
@@ -176,6 +179,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply(200,self.core.git_create_pr(name,title=str(obj.get('title','')),body=str(obj.get('body','')),head=str(obj.get('head','')),base=str(obj.get('base','main')),token=str(obj.get('token',''))))
                 if seg[4]=='resolve-conflicts' and method=='POST':
                     return self.reply(200,self.core.git_resolve_conflicts(name))
+                if seg[4]=='audit' and method=='POST':
+                    return self.reply(200,self.core.git_audit(name))
             if len(seg)>=4 and seg[3]=='worktrees':
                 if len(seg)==4 and method=='GET':
                     return self.reply(200,{'worktrees':self.core.list_worktrees(name)})
@@ -213,6 +218,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply(200,self.core.start_preview(name,None if port is None else int(port)))
                 if len(seg)==5 and seg[4]=='stop' and method=='POST':
                     return self.reply(200,self.core.stop_preview(name))
+            if len(seg)>=4 and seg[3]=='pwa':
+                if len(seg)==5 and seg[4]=='configure' and method=='POST':
+                    return self.reply(200,self.core.pwa_configure(name))
         raise BridgeError('Endpoint not found',404)
 
     def handle_one_request(self):

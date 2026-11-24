@@ -717,14 +717,27 @@ class LocalCore:
                 ans.append({'name': p.name, 'git': (p / '.git').exists(), 'package_json': (p / 'package.json').exists()})
         return ans
 
-    def create_project(self, name: str, git_url: str = '') -> dict[str, Any]:
+    def create_project(self, name: str, git_url: str = '', token: str = '') -> dict[str, Any]:
         if not NAME_RE.fullmatch(name) or name in {'.', '..'}:
             raise BridgeError('Invalid project name')
         target = self.workspaces / name
         if target.exists():
             raise BridgeError('Project already exists', 409)
         if git_url:
-            u = urlparse(git_url)
+            clean_url = git_url.strip()
+            # Normalize common URL variations
+            if clean_url.startswith('git@github.com:'):
+                clean_url = 'https://github.com/' + clean_url[len('git@github.com:'):]
+            elif clean_url.startswith('github.com/'):
+                clean_url = 'https://' + clean_url
+            elif re.fullmatch(r'^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$', clean_url):
+                clean_url = f'https://github.com/{clean_url}.git'
+            elif not clean_url.startswith('https://') and not clean_url.startswith('http://') and '/' in clean_url:
+                clean_url = 'https://github.com/' + clean_url.lstrip('/')
+
+            clean_url = clean_url.rstrip('/')
+
+            u = urlparse(clean_url)
             if u.scheme != 'https' or u.hostname != 'github.com' or u.username or u.password or u.port:
                 raise BridgeError('Only credential-free https://github.com URLs are accepted')
             if not re.fullmatch(r'/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?/?', u.path):
@@ -733,24 +746,41 @@ class LocalCore:
                 raise BridgeError('Git URL must not contain a query or fragment')
             try:
                 clone_cmd = ['git', 'clone']
-                gh_token = os.environ.get('GITHUB_TOKEN', '').strip()
+                gh_token = (token or '').strip() or os.environ.get('GITHUB_TOKEN', '').strip()
                 clone_env = os.environ.copy()
                 clone_env['GIT_TERMINAL_PROMPT'] = '0'
                 if gh_token:
                     import base64
                     basic = base64.b64encode(f'x-access-token:{gh_token}'.encode('utf-8')).decode('ascii')
                     clone_cmd += ['-c', f'http.https://github.com/.extraheader=AUTHORIZATION: basic {basic}']
-                clone_cmd += ['--', git_url, str(target)]
-                subprocess.run(clone_cmd, timeout=160, capture_output=True, check=True, env=clone_env)
-            except (OSError, subprocess.SubprocessError) as e:
+                clone_cmd += ['--', clean_url, str(target)]
+                res = subprocess.run(clone_cmd, timeout=160, capture_output=True, text=True, env=clone_env)
+                if res.returncode != 0:
+                    raw_err = (res.stderr or res.stdout or '').strip()
+                    shutil.rmtree(target, ignore_errors=True)
+                    clean_err = REDACTION.sub('[REDACTED]', raw_err)
+                    if 'Repository not found' in clean_err:
+                        if not gh_token:
+                            raise BridgeError('Repository not found or private. Please connect your GitHub account in Settings to clone private repositories.', 404)
+                        else:
+                            raise BridgeError('Repository not found or access denied with connected GitHub token.', 404)
+                    elif 'Authentication failed' in clean_err:
+                        raise BridgeError('GitHub authentication failed. Please check or reconnect your GitHub account in Settings.', 401)
+                    raise BridgeError(f'Clone failed: {clean_err[:300]}', 422)
+            except subprocess.TimeoutExpired:
                 shutil.rmtree(target, ignore_errors=True)
-                raw_err = ''
-                if isinstance(e, subprocess.CalledProcessError) and e.stderr:
-                    raw_err = e.stderr.decode('utf-8', errors='replace') if isinstance(e.stderr, bytes) else str(e.stderr)
-                else:
-                    raw_err = str(e)
-                clean_err = REDACTION.sub('[REDACTED]', raw_err).strip()
-                raise BridgeError(f'Clone failed: {clean_err[:300]}', 422)
+                raise BridgeError('Git clone timed out after 160 seconds. Check your internet connection.', 504)
+            except OSError as e:
+                shutil.rmtree(target, ignore_errors=True)
+                raise BridgeError(f'Git executable error: {str(e)}', 500)
+            if (target / '.git').exists():
+                git_cmd = shutil.which('git') or 'git'
+                gh_user = os.environ.get('GITHUB_USER', '').strip()
+                gh_email = os.environ.get('GITHUB_EMAIL', '').strip()
+                if gh_user:
+                    subprocess.run([git_cmd, 'config', 'user.name', gh_user], cwd=target, capture_output=True, timeout=5)
+                if gh_email:
+                    subprocess.run([git_cmd, 'config', 'user.email', gh_email], cwd=target, capture_output=True, timeout=5)
         else:
             target.mkdir(mode=0o700)
             (target / 'README.md').write_text(f'# {name}\n')
@@ -3015,3 +3045,234 @@ class LocalCore:
                 session['master_fd'] = None
         self._unregister_pid(f'terminal:{project}')
         return {'running': False}
+
+    # ---- Phase 5: Super Suite (Starter Templates, Audit & PWA) ----
+
+    def templates_init(self, project: str, template_id: str) -> dict[str, Any]:
+        self.create_project(project)
+        base = self._project(project)
+        git_cmd = shutil.which('git') or 'git'
+        t_id = (template_id or 'react_vite').strip().lower()
+
+        if t_id == 'react_vite':
+            files = {
+                'package.json': json.dumps({
+                    "name": project,
+                    "private": True,
+                    "version": "0.1.0",
+                    "type": "module",
+                    "scripts": { "dev": "vite", "build": "vite build", "preview": "vite preview" },
+                    "dependencies": { "react": "^18.3.1", "react-dom": "^18.3.1", "lucide-react": "^0.460.0" },
+                    "devDependencies": { "@vitejs/plugin-react": "^4.3.4", "vite": "^6.0.0", "tailwindcss": "^3.4.15", "autoprefixer": "^10.4.20", "postcss": "^8.4.49" }
+                }, indent=2),
+                'vite.config.js': 'import { defineConfig } from "vite";\nimport react from "@vitejs/plugin-react";\n\nexport default defineConfig({\n  plugins: [react()],\n  server: { host: "127.0.0.1", port: 5173 }\n});\n',
+                'index.html': f'<!doctype html>\n<html lang="en">\n  <head>\n    <meta charset="UTF-8" />\n    <meta name="viewport" content="width=device-width, initial-scale=1.0" />\n    <title>{project}</title>\n  </head>\n  <body class="bg-slate-900 text-slate-100">\n    <div id="root"></div>\n    <script type="module" src="/src/main.jsx"></script>\n  </body>\n</html>\n',
+                'src/main.jsx': 'import React from "react";\nimport ReactDOM from "react-dom/client";\nimport App from "./App.jsx";\nimport "./index.css";\n\nReactDOM.createRoot(document.getElementById("root")).render(\n  <React.StrictMode>\n    <App />\n  </React.StrictMode>\n);\n',
+                'src/App.jsx': 'import React, { useState } from "react";\nimport { Sparkles, Plus, Trash2, CheckCircle2 } from "lucide-react";\n\nexport default function App() {\n  const [count, setCount] = useState(0);\n  const [notes, setNotes] = useState([\n    "Build with OmniDev Tablet",\n    "Edit with Stylus and Inspector"\n  ]);\n  const [input, setInput] = useState("");\n\n  const addNote = () => {\n    if (!input.trim()) return;\n    setNotes([...notes, input.trim()]);\n    setInput("");\n  };\n\n  return (\n    <div className="min-h-screen p-8 max-w-2xl mx-auto flex flex-col gap-6">\n      <header className="flex items-center gap-3 border-b border-slate-800 pb-4">\n        <div className="p-2.5 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 text-white shadow-lg">\n          <Sparkles className="w-6 h-6" />\n        </div>\n        <div>\n          <h1 className="text-2xl font-bold tracking-tight">React + Vite Studio</h1>\n          <p className="text-sm text-slate-400">Created with OmniDev Starter Templates</p>\n        </div>\n      </header>\n\n      <div className="grid grid-cols-2 gap-4">\n        <div className="p-5 rounded-xl bg-slate-800/60 border border-slate-700/60 shadow-sm">\n          <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">State Counter</p>\n          <h2 className="text-3xl font-extrabold text-indigo-400 mb-3">{count}</h2>\n          <button onClick={() => setCount(c => c + 1)} className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-sm font-semibold transition-all shadow-md">\n            Increment\n          </button>\n        </div>\n        <div className="p-5 rounded-xl bg-slate-800/60 border border-slate-700/60 shadow-sm">\n          <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">Active Notes</p>\n          <h2 className="text-3xl font-extrabold text-emerald-400 mb-3">{notes.length}</h2>\n          <span className="inline-flex items-center gap-1.5 text-xs text-emerald-400/90 font-medium">\n            <CheckCircle2 className="w-3.5 h-3.5" /> Synchronized\n          </span>\n        </div>\n      </div>\n\n      <div className="p-5 rounded-xl bg-slate-800/60 border border-slate-700/60 shadow-sm flex flex-col gap-3">\n        <h3 className="text-sm font-bold text-slate-200">Interactive Notes</h3>\n        <div className="flex gap-2">\n          <input\n            value={input}\n            onChange={e => setInput(e.target.value)}\n            onKeyDown={e => e.key === "Enter" && addNote()}\n            placeholder="Add new task or note..."\n            className="flex-1 px-3.5 py-2 rounded-lg bg-slate-900 border border-slate-700 text-sm focus:outline-none focus:border-indigo-500 text-slate-100"\n          />\n          <button onClick={addNote} className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-sm font-semibold flex items-center gap-1 shadow-md">\n            <Plus className="w-4 h-4" /> Add\n          </button>\n        </div>\n        <ul className="flex flex-col gap-2 mt-2">\n          {notes.map((n, i) => (\n            <li key={i} className="flex items-center justify-between p-2.5 rounded-lg bg-slate-900/80 border border-slate-700/50 text-sm">\n              <span>{n}</span>\n              <button onClick={() => setNotes(notes.filter((_, idx) => idx !== i))} className="text-slate-500 hover:text-red-400 transition-colors">\n                <Trash2 className="w-4 h-4" />\n              </button>\n            </li>\n          ))}\n        </ul>\n      </div>\n    </div>\n  );\n}\n',
+                'src/index.css': '@tailwind base;\n@tailwind components;\n@tailwind utilities;\n\nbody {\n  margin: 0;\n  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;\n  background: #0f172a;\n  color: #f8fafc;\n}\n',
+                '.gitignore': 'node_modules/\ndist/\n.env\n.env.*\n!.env.example\n'
+            }
+        elif t_id == 'pwa_notes':
+            files = {
+                'package.json': json.dumps({
+                    "name": project,
+                    "private": True,
+                    "version": "1.0.0",
+                    "type": "module",
+                    "scripts": { "dev": "vite", "build": "vite build", "preview": "vite preview" },
+                    "devDependencies": { "vite": "^6.0.0" }
+                }, indent=2),
+                'vite.config.js': 'import { defineConfig } from "vite";\nexport default defineConfig({ server: { host: "127.0.0.1", port: 5173 } });\n',
+                'index.html': f'<!doctype html>\n<html lang="en">\n  <head>\n    <meta charset="UTF-8" />\n    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />\n    <link rel="manifest" href="/manifest.json" />\n    <meta name="theme-color" content="#4f46e5" />\n    <title>{project}</title>\n    <link rel="stylesheet" href="/src/style.css" />\n  </head>\n  <body>\n    <div class="app-container">\n      <header class="app-header">\n        <div class="header-content">\n          <h1>📱 Mobile PWA Notes</h1>\n          <p class="subtitle">Offline-first local storage</p>\n        </div>\n        <button id="add-btn" class="btn-primary">+ New Note</button>\n      </header>\n      <main class="notes-grid" id="notes-container"></main>\n    </div>\n    <script type="module" src="/src/main.js"></script>\n  </body>\n</html>\n',
+                'src/main.js': 'const STORAGE_KEY = "pwa_notes_data";\nlet notes = JSON.parse(localStorage.getItem(STORAGE_KEY) || \'[{"id":"1","title":"Welcome to PWA Notes","content":"Installed and running fully offline on your Android tablet."}]\');\n\nfunction render() {\n  const container = document.getElementById("notes-container");\n  container.innerHTML = notes.map(n => `\n    <div class="note-card" data-id="${n.id}">\n      <h3>${n.title}</h3>\n      <p>${n.content}</p>\n      <button class="delete-btn" onclick="deleteNote(\'${n.id}\')">✕ Delete</button>\n    </div>\n  `).join("");\n}\n\nwindow.deleteNote = function(id) {\n  notes = notes.filter(n => n.id !== id);\n  localStorage.setItem(STORAGE_KEY, JSON.stringify(notes));\n  render();\n};\n\ndocument.getElementById("add-btn").addEventListener("click", () => {\n  const title = prompt("Note title:") || "Untitled";\n  const content = prompt("Note content:") || "";\n  notes.unshift({ id: Date.now().toString(), title, content });\n  localStorage.setItem(STORAGE_KEY, JSON.stringify(notes));\n  render();\n});\n\nif ("serviceWorker" in navigator) {\n  navigator.serviceWorker.register("/sw.js").catch(() => {});\n}\n\nrender();\n',
+                'src/style.css': '* { box-sizing: border-box; margin: 0; padding: 0; }\nbody { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 1.5rem; }\n.app-container { max-width: 680px; margin: 0 auto; display: flex; flex-direction: column; gap: 1.5rem; }\n.app-header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #1e293b; padding-bottom: 1rem; }\n.app-header h1 { font-size: 1.5rem; font-weight: 700; color: #818cf8; }\n.subtitle { font-size: 0.85rem; color: #94a3b8; }\n.btn-primary { background: #4f46e5; color: white; border: none; padding: 0.6rem 1.2rem; border-radius: 8px; font-weight: 600; cursor: pointer; }\n.notes-grid { display: flex; flex-direction: column; gap: 1rem; }\n.note-card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 1.2rem; display: flex; flex-direction: column; gap: 0.6rem; }\n.note-card h3 { font-size: 1.1rem; color: #f1f5f9; }\n.note-card p { font-size: 0.95rem; color: #cbd5e1; line-height: 1.4; }\n.delete-btn { align-self: flex-end; background: transparent; border: none; color: #ef4444; font-size: 0.8rem; cursor: pointer; padding: 0.2rem 0.5rem; }\n',
+                'public/manifest.json': json.dumps({
+                    "name": project,
+                    "short_name": project,
+                    "start_url": "/",
+                    "display": "standalone",
+                    "background_color": "#0f172a",
+                    "theme_color": "#4f46e5"
+                }, indent=2),
+                'public/sw.js': 'self.addEventListener("install", e => e.waitUntil(caches.open("pwa-v1").then(c => c.addAll(["/"]))));\nself.addEventListener("fetch", e => e.respondWith(caches.match(e.request).then(r => r || fetch(e.request))));\n',
+                '.gitignore': 'node_modules/\ndist/\n'
+            }
+        elif t_id == 'data_dashboard':
+            files = {
+                'package.json': json.dumps({
+                    "name": project,
+                    "private": True,
+                    "version": "1.0.0",
+                    "type": "module",
+                    "scripts": { "dev": "vite", "build": "vite build", "preview": "vite preview" },
+                    "dependencies": { "chart.js": "^4.4.6" },
+                    "devDependencies": { "vite": "^6.0.0" }
+                }, indent=2),
+                'vite.config.js': 'import { defineConfig } from "vite";\nexport default defineConfig({ server: { host: "127.0.0.1", port: 5173 } });\n',
+                'index.html': f'<!doctype html>\n<html lang="en">\n  <head>\n    <meta charset="UTF-8" />\n    <meta name="viewport" content="width=device-width, initial-scale=1.0" />\n    <title>{project} Dashboard</title>\n    <link rel="stylesheet" href="/src/style.css" />\n  </head>\n  <body>\n    <div class="dash-wrap">\n      <header class="dash-head">\n        <h1>📊 Performance & Analytics</h1>\n        <div class="badge">Realtime Telemetry</div>\n      </header>\n      <div class="grid-stats">\n        <div class="stat-card"><span>Total Revenue</span><h2>$128,450</h2><span class="trend">+14.2%</span></div>\n        <div class="stat-card"><span>Active Users</span><h2>24,890</h2><span class="trend">+8.6%</span></div>\n        <div class="stat-card"><span>Conversion</span><h2>3.82%</h2><span class="trend">+0.4%</span></div>\n      </div>\n      <div class="chart-container">\n        <canvas id="revChart"></canvas>\n      </div>\n    </div>\n    <script type="module" src="/src/main.js"></script>\n  </body>\n</html>\n',
+                'src/main.js': 'import Chart from "chart.js/auto";\nconst ctx = document.getElementById("revChart");\nnew Chart(ctx, {\n  type: "line",\n  data: {\n    labels: ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],\n    datasets: [{\n      label: "Revenue ($k)",\n      data: [65, 78, 90, 81, 95, 110, 125, 120, 140, 155, 168, 185],\n      borderColor: "#38bdf8",\n      backgroundColor: "rgba(56, 189, 248, 0.15)",\n      tension: 0.35,\n      fill: true\n    }]\n  },\n  options: {\n    responsive: true,\n    maintainAspectRatio: false,\n    plugins: { legend: { labels: { color: "#94a3b8" } } },\n    scales: {\n      x: { ticks: { color: "#94a3b8" }, grid: { color: "#334155" } },\n      y: { ticks: { color: "#94a3b8" }, grid: { color: "#334155" } }\n    }\n  }\n});\n',
+                'src/style.css': '* { margin: 0; padding: 0; box-sizing: border-box; }\nbody { font-family: system-ui, sans-serif; background: #0f172a; color: #f8fafc; padding: 2rem; }\n.dash-wrap { max-width: 960px; margin: 0 auto; display: flex; flex-direction: column; gap: 1.5rem; }\n.dash-head { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #334155; padding-bottom: 1rem; }\n.badge { background: #0284c7; color: white; padding: 0.3rem 0.8rem; border-radius: 999px; font-size: 0.75rem; font-weight: 700; }\n.grid-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; }\n.stat-card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 1.2rem; display: flex; flex-direction: column; gap: 0.4rem; }\n.stat-card span { font-size: 0.8rem; color: #94a3b8; }\n.stat-card h2 { font-size: 1.8rem; font-weight: 800; color: #38bdf8; }\n.trend { color: #4ade80 !important; font-weight: 600; font-size: 0.75rem !important; }\n.chart-container { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 1.5rem; height: 380px; }\n',
+                '.gitignore': 'node_modules/\ndist/\n'
+            }
+        else:
+            files = {
+                'main.py': 'from fastapi import FastAPI\nfrom pydantic import BaseModel\nimport sqlite3\n\napp = FastAPI(title="FastAPI Tablet Studio", version="1.0.0")\n\ndef init_db():\n    conn = sqlite3.connect("database.db")\n    c = conn.cursor()\n    c.execute("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, done BOOLEAN)")\n    conn.commit()\n    conn.close()\n\ninit_db()\n\nclass Item(BaseModel):\n    title: str\n    done: bool = False\n\n@app.get("/")\ndef read_root():\n    return {"status": "online", "message": "FastAPI running on Android MatePad"}\n\n@app.get("/items")\ndef get_items():\n    conn = sqlite3.connect("database.db")\n    c = conn.cursor()\n    c.execute("SELECT id, title, done FROM items")\n    rows = c.fetchall()\n    conn.close()\n    return [{"id": r[0], "title": r[1], "done": bool(r[2])} for r in rows]\n',
+                'requirements.txt': 'fastapi>=0.115.0\nuvicorn>=0.32.0\npydantic>=2.9.0\n',
+                'README.md': f'# {project}\n\nPython FastAPI service created with OmniDev Starter Templates on Android.\n',
+                '.gitignore': '__pycache__/\n*.pyc\n.venv/\ndatabase.db\n'
+            }
+
+        for rel_path, content in files.items():
+            dest = base / rel_path
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(content, encoding='utf-8')
+
+        subprocess.run([git_cmd, 'init', '-q', str(base)], check=True, timeout=10)
+        subprocess.run([git_cmd, 'add', '-A'], cwd=base, check=True, timeout=10)
+        gh_user = os.environ.get('GITHUB_USER', 'Tablet User').strip() or 'Tablet User'
+        gh_email = os.environ.get('GITHUB_EMAIL', 'user@tablet.local').strip() or 'user@tablet.local'
+        subprocess.run([git_cmd, '-c', f'user.name={gh_user}', '-c', f'user.email={gh_email}', 'commit', '-m', f'feat: init starter template ({t_id})'], cwd=base, check=True, timeout=15)
+
+        return {'success': True, 'initialized': True, 'project': project, 'template': t_id, 'files_count': len(files)}
+
+    def git_audit(self, project: str) -> dict[str, Any]:
+        base = self._project(project)
+        git_cmd = shutil.which('git') or 'git'
+        if not (base / '.git').exists():
+            return {'findings': [], 'clean': True, 'summary': 'Not a git repository'}
+
+        diff_res = subprocess.run([git_cmd, 'diff', 'HEAD'], cwd=base, capture_output=True, text=True, timeout=15)
+        diff_text = diff_res.stdout
+        if not diff_text.strip():
+            diff_res = subprocess.run([git_cmd, 'diff', 'HEAD~1'], cwd=base, capture_output=True, text=True, timeout=15)
+            diff_text = diff_res.stdout
+
+        findings: list[dict[str, Any]] = []
+
+        secret_patterns = [
+            (re.compile(r'sk-(?:ant-|proj-)?[A-Za-z0-9_\-]{20,}'), 'API Key Detected', 'Exposing API keys in code commits creates severe security liabilities.'),
+            (re.compile(r'gh[pousr]_[A-Za-z0-9]{20,}'), 'GitHub Token Detected', 'GitHub credentials should never be committed into source files.'),
+            (re.compile(r'AIza[A-Za-z0-9_\-]{20,}'), 'Google / Gemini Key Detected', 'API keys must be loaded from .env and kept in SecureSecrets.'),
+            (re.compile(r'(?:password|secret|passwd)\s*=\s*[\'"][^\'"]{6,}[\'"]', re.I), 'Hardcoded Password Detected', 'Passwords should not be hardcoded in application source.')
+        ]
+
+        warning_patterns = [
+            (re.compile(r'console\.log\('), 'Console Log in Code', 'Remove debugging console.logs before production release.'),
+            (re.compile(r'\bdebugger;'), 'Debugger Statement', 'Breakpoints left in production source freeze the browser.'),
+            (re.compile(r'\bTODO:'), 'Unresolved TODO Item', 'Review pending TODO task before committing.'),
+            (re.compile(r'\bFIXME:'), 'Pending FIXME Warning', 'Ensure bug has been addressed before final push.')
+        ]
+
+        tip_patterns = [
+            (re.compile(r'\balert\('), 'Browser alert() used', 'Consider using modern UI toasts or dialogs instead of blocking alert().'),
+            (re.compile(r'catch\s*\([^)]*\)\s*\{\s*\}'), 'Empty catch block', 'Silencing exceptions without logging obscures runtime failures.')
+        ]
+
+        current_file = ''
+        line_num = 1
+        for line in diff_text.splitlines():
+            if line.startswith('+++ b/'):
+                current_file = line[6:].strip()
+                line_num = 1
+                continue
+            elif line.startswith('@@'):
+                m = re.search(r'\+(\d+)', line)
+                if m:
+                    line_num = int(m.group(1))
+                continue
+            elif line.startswith('+') and not line.startswith('+++'):
+                added_code = line[1:]
+                for pat, title, desc in secret_patterns:
+                    if pat.search(added_code):
+                        findings.append({
+                            'severity': 'CRITICAL',
+                            'title': title,
+                            'description': desc,
+                            'file': current_file,
+                            'line': line_num,
+                            'code': added_code.strip()[:80],
+                            'suggested_fix': 'Move secret value to .env and read via process.env'
+                        })
+                for pat, title, desc in warning_patterns:
+                    if pat.search(added_code):
+                        findings.append({
+                            'severity': 'WARNING',
+                            'title': title,
+                            'description': desc,
+                            'file': current_file,
+                            'line': line_num,
+                            'code': added_code.strip()[:80],
+                            'suggested_fix': 'Clean up or refactor debugging code'
+                        })
+                for pat, title, desc in tip_patterns:
+                    if pat.search(added_code):
+                        findings.append({
+                            'severity': 'TIP',
+                            'title': title,
+                            'description': desc,
+                            'file': current_file,
+                            'line': line_num,
+                            'code': added_code.strip()[:80],
+                            'suggested_fix': 'Enhance user feedback or error handling'
+                        })
+                line_num += 1
+            elif not line.startswith('-'):
+                line_num += 1
+
+        return {
+            'findings': findings[:50],
+            'clean': len(findings) == 0,
+            'critical_count': sum(1 for f in findings if f['severity'] == 'CRITICAL'),
+            'warning_count': sum(1 for f in findings if f['severity'] == 'WARNING'),
+            'tip_count': sum(1 for f in findings if f['severity'] == 'TIP')
+        }
+
+    def pwa_configure(self, project: str) -> dict[str, Any]:
+        base = self._project(project)
+        public_dir = base / 'public'
+        public_dir.mkdir(parents=True, exist_ok=True)
+
+        manifest_path = public_dir / 'manifest.json'
+        if not manifest_path.exists():
+            manifest = {
+                "name": project,
+                "short_name": project,
+                "start_url": "/",
+                "display": "standalone",
+                "background_color": "#0f172a",
+                "theme_color": "#4f46e5",
+                "orientation": "any"
+            }
+            manifest_path.write_text(json.dumps(manifest, indent=2), encoding='utf-8')
+
+        sw_path = public_dir / 'sw.js'
+        if not sw_path.exists():
+            sw_code = (
+                "const CACHE_NAME = 'tablet-pwa-v1';\n"
+                "self.addEventListener('install', e => {\n"
+                "  e.waitUntil(caches.open(CACHE_NAME).then(c => c.addAll(['/'])));\n"
+                "});\n"
+                "self.addEventListener('fetch', e => {\n"
+                "  e.respondWith(caches.match(e.request).then(res => res || fetch(e.request)));\n"
+                "});\n"
+            )
+            sw_path.write_text(sw_code, encoding='utf-8')
+
+        index_html = base / 'index.html'
+        injected = False
+        if index_html.exists():
+            try:
+                html = index_html.read_text(encoding='utf-8', errors='replace')
+                if 'manifest.json' not in html:
+                    html = html.replace('</head>', '    <link rel="manifest" href="/manifest.json" />\n  </head>')
+                    index_html.write_text(html, encoding='utf-8')
+                    injected = True
+            except Exception:
+                pass
+
+        return {
+            'success': True,
+            'manifest_created': True,
+            'sw_created': True,
+            'index_injected': injected
+        }

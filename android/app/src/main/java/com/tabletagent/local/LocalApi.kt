@@ -55,8 +55,8 @@ class LocalApi(private val deviceToken: String, port: Int = 8765) {
 
     suspend fun health(): Boolean = healthInfo()?.optBoolean("ok", false) == true
     suspend fun projects(): JSONArray = request("GET", "/v1/projects").getJSONArray("projects")
-    suspend fun createProject(name: String, url: String) = request("POST", "/v1/projects",
-        JSONObject().put("name", name).put("git_url", url))
+    suspend fun createProject(name: String, url: String, token: String = "") = request("POST", "/v1/projects",
+        JSONObject().put("name", name).put("git_url", url).put("token", token))
     suspend fun tasks(project: String): JSONArray = request("GET", "/v1/tasks?project=${encode(project)}").getJSONArray("tasks")
     suspend fun agents(): JSONArray = request("GET", "/v1/agents").getJSONArray("agents")
     suspend fun startTask(project: String, prompt: String, mode: String, agent: String = "codex", model: String = "", taskId: String = "", useWorktree: Boolean = false): JSONObject = request("POST", "/v1/tasks",
@@ -151,4 +151,14 @@ class LocalApi(private val deviceToken: String, port: Int = 8765) {
         request("POST", "/v1/slm/setup", JSONObject().put("action", action).put("model", model))
     suspend fun slmDownload(model: String = "qwen2.5-coder-1.5b"): JSONObject =
         request("POST", "/v1/slm/download", JSONObject().put("model", model))
+
+    // Super Suite: Templates, Audit, PWA & Attachments
+    suspend fun initTemplate(project: String, templateId: String): JSONObject =
+        request("POST", "/v1/templates/init", JSONObject().put("project", project).put("template_id", templateId))
+    suspend fun gitAudit(project: String): JSONObject =
+        request("POST", "/v1/projects/${encode(project)}/git/audit", JSONObject())
+    suspend fun pwaConfigure(project: String): JSONObject =
+        request("POST", "/v1/projects/${encode(project)}/pwa/configure", JSONObject())
+    suspend fun saveAttachment(project: String, filename: String, dataB64: String): JSONObject =
+        request("POST", "/v1/projects/${encode(project)}/attachments", JSONObject().put("filename", filename).put("data_b64", dataB64))
 }

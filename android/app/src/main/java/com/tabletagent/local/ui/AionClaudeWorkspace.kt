@@ -283,6 +283,7 @@ fun AionClaudeSidebar(
     selectedProject: String,
     onSelectProject: (String) -> Unit,
     onNewProject: () -> Unit,
+    onOpenTemplates: () -> Unit = {},
     tasks: List<JSONObject>,
     selectedTask: String,
     isNewChatMode: Boolean,
@@ -293,6 +294,7 @@ fun AionClaudeSidebar(
     onOpenSettings: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val isOnline by com.tabletagent.local.runtime.NetworkMonitor.isOnline.collectAsState()
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant,
         modifier = modifier.fillMaxHeight().width(232.dp)
@@ -327,11 +329,29 @@ fun AionClaudeSidebar(
                         fontWeight = FontWeight.Bold,
                         maxLines = 1
                     )
-                    Text(
-                        "Agentic AI Studio",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1
+                    if (!isOnline) {
+                        Text(
+                            "✈️ Offline (Local SLM)",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFFD97706),
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1
+                        )
+                    } else {
+                        Text(
+                            "Agentic AI Studio",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1
+                        )
+                    }
+                }
+                IconButton(onClick = onOpenTemplates, modifier = Modifier.size(28.dp)) {
+                    Icon(
+                        Icons.Default.Bolt,
+                        contentDescription = "Starter Templates",
+                        modifier = Modifier.size(17.dp),
+                        tint = MaterialTheme.colorScheme.primary
                     )
                 }
                 IconButton(onClick = onNewProject, modifier = Modifier.size(28.dp)) {
