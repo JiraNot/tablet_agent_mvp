@@ -127,10 +127,10 @@ fun SecurityAuditDialog(
                             }
                         }
                         if (warnCount > 0) {
-                            Surface(color = Color(0xFFFEF3C7), shape = RoundedCornerShape(6.dp)) {
+                            Surface(color = Color(0xFFF59E0B).copy(alpha = 0.16f), shape = RoundedCornerShape(6.dp)) {
                                 Text(
                                     "$warnCount Warning",
-                                    color = Color(0xFF92400E),
+                                    color = Color(0xFFF59E0B),
                                     fontWeight = FontWeight.Bold,
                                     style = MaterialTheme.typography.labelSmall,
                                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
@@ -153,7 +153,7 @@ fun SecurityAuditDialog(
                     findings.forEach { item ->
                         val (bgColor, txtColor) = when (item.severity) {
                             "CRITICAL" -> MaterialTheme.colorScheme.errorContainer to MaterialTheme.colorScheme.onErrorContainer
-                            "WARNING" -> Color(0xFFFFFBEB) to Color(0xFF78350F)
+                            "WARNING" -> Color(0xFFF59E0B).copy(alpha = 0.14f) to MaterialTheme.colorScheme.onSurface
                             else -> MaterialTheme.colorScheme.surfaceVariant to MaterialTheme.colorScheme.onSurfaceVariant
                         }
 

@@ -167,8 +167,8 @@ fun CoolifyDialog(
                         }
                     }
                     if (actionBanner.isNotBlank()) {
-                        Surface(color = Color(0xFF065F46), shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth()) {
-                            Text(actionBanner, color = Color.White, fontSize = 11.sp, modifier = Modifier.padding(8.dp))
+                        Surface(color = MaterialTheme.colorScheme.tertiaryContainer, shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth()) {
+                            Text(actionBanner, color = MaterialTheme.colorScheme.onTertiaryContainer, fontSize = 11.sp, modifier = Modifier.padding(8.dp))
                         }
                     }
 

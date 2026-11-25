@@ -540,6 +540,18 @@ fun TabletAgentApp() {
     }
 
     MaterialTheme(colorScheme = if (darkTheme) aionClaudeDarkScheme() else aionClaudeLightScheme()) {
+        val view = androidx.compose.ui.platform.LocalView.current
+        if (!view.isInEditMode) {
+            val bgColor = MaterialTheme.colorScheme.surface
+            SideEffect {
+                val window = (view.context as? android.app.Activity)?.window
+                if (window != null) {
+                    val controller = androidx.core.view.WindowCompat.getInsetsController(window, view)
+                    controller.isAppearanceLightStatusBars = !darkTheme
+                    controller.isAppearanceLightNavigationBars = !darkTheme
+                }
+            }
+        }
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             Row(Modifier.fillMaxSize()) {
                 if (sidebarOpen) {
@@ -2622,13 +2634,13 @@ private fun SettingsScreen(
                                 Text("Coolify Deployment Integration", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                                 Spacer(Modifier.weight(1f))
                                 Surface(
-                                    color = if (keySummary.coolifyConfigured) Color(0xFF065F46) else MaterialTheme.colorScheme.surface,
+                                    color = if (keySummary.coolifyConfigured) MaterialTheme.colorScheme.tertiaryContainer else MaterialTheme.colorScheme.surface,
                                     shape = RoundedCornerShape(6.dp)
                                 ) {
                                     Text(
                                         if (keySummary.coolifyConfigured) "Configured (${keySummary.coolifyTokenHint})" else "Not Configured",
                                         style = MaterialTheme.typography.labelSmall,
-                                        color = if (keySummary.coolifyConfigured) Color(0xFFD1FAE5) else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        color = if (keySummary.coolifyConfigured) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
                                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                                     )
                                 }
@@ -2995,7 +3007,7 @@ fun GitReviewDialog(
                     Text("Git Control Center", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.width(8.dp))
                     Surface(
-                        color = Color(0xFF1E3A8A),
+                        color = MaterialTheme.colorScheme.primaryContainer,
                         shape = RoundedCornerShape(12.dp)
                     ) {
                         Text(
@@ -3003,7 +3015,7 @@ fun GitReviewDialog(
                             modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.Bold,
-                            color = Color(0xFFDBEAFE)
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
                         )
                     }
                     Spacer(Modifier.weight(1f))
@@ -3066,8 +3078,10 @@ fun GitReviewDialog(
                 }
 
                 gitBanner?.let { (isSuccess, msg) ->
+                    val bannerBg = if (isSuccess) MaterialTheme.colorScheme.tertiaryContainer else MaterialTheme.colorScheme.errorContainer
+                    val bannerFg = if (isSuccess) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onErrorContainer
                     Surface(
-                        color = if (isSuccess) Color(0xFF065F46) else Color(0xFF991B1B),
+                        color = bannerBg,
                         shape = RoundedCornerShape(8.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
@@ -3078,13 +3092,13 @@ fun GitReviewDialog(
                             Icon(
                                 if (isSuccess) Icons.Default.CheckCircle else Icons.Default.Error,
                                 contentDescription = null,
-                                tint = Color.White,
+                                tint = bannerFg,
                                 modifier = Modifier.size(16.dp)
                             )
                             Spacer(Modifier.width(8.dp))
                             Text(
                                 msg,
-                                color = Color.White,
+                                color = bannerFg,
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Medium,
                                 modifier = Modifier.weight(1f),
@@ -3092,7 +3106,7 @@ fun GitReviewDialog(
                                 overflow = TextOverflow.Ellipsis
                             )
                             IconButton(onClick = { gitBanner = null }, modifier = Modifier.size(22.dp)) {
-                                Icon(Icons.Default.Close, contentDescription = "Dismiss", tint = Color.White, modifier = Modifier.size(14.dp))
+                                Icon(Icons.Default.Close, contentDescription = "Dismiss", tint = bannerFg, modifier = Modifier.size(14.dp))
                             }
                         }
                     }

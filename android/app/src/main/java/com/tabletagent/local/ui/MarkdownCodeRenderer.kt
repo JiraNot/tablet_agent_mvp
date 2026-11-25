@@ -233,24 +233,24 @@ fun MarkdownAssistantContent(
                     )
                 }
                 is MarkdownNode.Alert -> {
-                    val (badgeColor, bgColor, icon) = when (node.type) {
-                        "TIP" -> Triple(Color(0xFF059669), Color(0xFFECFDF5), Icons.Default.Lightbulb)
-                        "WARNING" -> Triple(Color(0xFFD97706), Color(0xFFFFFBEB), Icons.Default.Warning)
-                        "CAUTION" -> Triple(Color(0xFFDC2626), Color(0xFFFEF2F2), Icons.Default.Error)
-                        "IMPORTANT" -> Triple(Color(0xFF7C3AED), Color(0xFFF5F3FF), Icons.Default.PriorityHigh)
-                        else -> Triple(Color(0xFF2563EB), Color(0xFFEFF6FF), Icons.Default.Info)
+                    val (badgeColor, icon) = when (node.type) {
+                        "TIP" -> Color(0xFF059669) to Icons.Default.Lightbulb
+                        "WARNING" -> Color(0xFFD97706) to Icons.Default.Warning
+                        "CAUTION" -> Color(0xFFDC2626) to Icons.Default.Error
+                        "IMPORTANT" -> Color(0xFF7C3AED) to Icons.Default.PriorityHigh
+                        else -> Color(0xFF2563EB) to Icons.Default.Info
                     }
                     Surface(
                         shape = RoundedCornerShape(8.dp),
-                        color = bgColor,
-                        border = BorderStroke(1.dp, badgeColor.copy(alpha = 0.5f)),
+                        color = badgeColor.copy(alpha = 0.12f),
+                        border = BorderStroke(1.dp, badgeColor.copy(alpha = 0.45f)),
                         modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
                     ) {
                         Row(modifier = Modifier.padding(10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Icon(icon, contentDescription = node.type, tint = badgeColor, modifier = Modifier.size(18.dp))
                             Column {
                                 Text(node.type, fontWeight = FontWeight.Bold, fontSize = 11.sp, color = badgeColor)
-                                Text(node.text, fontSize = 12.sp, color = Color(0xFF1E293B))
+                                Text(node.text, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface)
                             }
                         }
                     }
