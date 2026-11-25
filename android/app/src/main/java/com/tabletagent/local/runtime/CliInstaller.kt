@@ -29,7 +29,7 @@ object CliInstaller {
         val agyRes = EmbeddedProcessRunner.execute(context, "agy --version")
         val claudeRes = EmbeddedProcessRunner.execute(context, "claude --version")
         val chromiumRes = EmbeddedProcessRunner.execute(context, "chromium-browser --version 2>/dev/null || chromium --version 2>/dev/null")
-        val pwRes = EmbeddedProcessRunner.execute(context, "playwright --version 2>/dev/null || node -e \"try{console.log(require('playwright/package.json').version)}catch{process.exit(1)}\"")
+        val pwRes = EmbeddedProcessRunner.execute(context, "playwright --version 2>/dev/null || NODE_PATH=\"$(npm root -g 2>/dev/null)\" node -e \"try{console.log(require('playwright/package.json').version)}catch{process.exit(1)}\"")
 
         CliVersions(
             node = if (nodeRes.exitCode == 0) nodeRes.stdout.trim() else null,
@@ -62,7 +62,7 @@ object CliInstaller {
             elif command -v apt-get >/dev/null 2>&1; then
                 apt-get update && apt-get install -y chromium
             fi && \
-            PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install -g playwright
+            PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install -g playwright --no-audit --no-fund --loglevel=error
         """.trimIndent()
         EmbeddedProcessRunner.execute(context, cmd, timeoutMs = 300_000L)
     }

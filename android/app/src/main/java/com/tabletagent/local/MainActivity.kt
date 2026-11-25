@@ -977,7 +977,8 @@ fun TabletAgentApp() {
                                     "WebQA" -> CliInstaller.installWebQaTools(context)
                                     else -> ExecutionResult(-1, "", "Unknown CLI")
                                 }
-                                notify(Throwable(if (res.exitCode == 0) "$type CLI installed successfully!" else "Failed: ${res.stderr}"))
+                                val detail = res.stderr.ifBlank { res.stdout }.trim().takeLast(240)
+                                notify(Throwable(if (res.exitCode == 0) "$type CLI installed successfully!" else "Failed ($type): $detail"))
                             } catch (e: Exception) {
                                 notify(e)
                             } finally {
