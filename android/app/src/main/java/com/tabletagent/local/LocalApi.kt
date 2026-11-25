@@ -164,4 +164,16 @@ class LocalApi(private val deviceToken: String, port: Int = 8765) {
         request("POST", "/v1/projects/${encode(project)}/pwa/configure", JSONObject())
     suspend fun saveAttachment(project: String, filename: String, dataB64: String): JSONObject =
         request("POST", "/v1/projects/${encode(project)}/attachments", JSONObject().put("filename", filename).put("data_b64", dataB64))
+
+    // Coolify API v1 Integration
+    suspend fun coolifyTest(url: String, token: String): JSONObject =
+        request("POST", "/v1/coolify/test", JSONObject().put("url", url).put("token", token))
+    suspend fun coolifyOverview(url: String, token: String, project: String = ""): JSONObject =
+        request("POST", "/v1/coolify/overview", JSONObject().put("url", url).put("token", token).put("project", project))
+    suspend fun coolifyDeployments(url: String, token: String, appUuid: String): JSONObject =
+        request("POST", "/v1/coolify/deployments", JSONObject().put("url", url).put("token", token).put("app_uuid", appUuid))
+    suspend fun coolifyDeploymentLogs(url: String, token: String, deploymentUuid: String): JSONObject =
+        request("POST", "/v1/coolify/deployment-logs", JSONObject().put("url", url).put("token", token).put("deployment_uuid", deploymentUuid))
+    suspend fun coolifyDeploy(url: String, token: String, appUuid: String): JSONObject =
+        request("POST", "/v1/coolify/deploy", JSONObject().put("url", url).put("token", token).put("app_uuid", appUuid))
 }

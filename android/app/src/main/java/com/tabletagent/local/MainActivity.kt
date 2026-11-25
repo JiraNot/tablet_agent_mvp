@@ -57,6 +57,7 @@ import com.tabletagent.local.ui.AionClaudeSidebar
 import com.tabletagent.local.ui.ClaudeCodeTopBar
 import com.tabletagent.local.ui.CliOAuthDialog
 import com.tabletagent.local.ui.CodeEditorWithLineNumbers
+import com.tabletagent.local.ui.CoolifyDialog
 import com.tabletagent.local.ui.GitHubUnifiedAccountCard
 import com.tabletagent.local.ui.HapticFeedbackHelper
 import com.tabletagent.local.ui.HermesMemoryDialog
@@ -152,6 +153,7 @@ fun TabletAgentApp() {
     val isInternetConnected by NetworkMonitor.isOnline.collectAsState()
     var previousCloudAgent by rememberSaveable { mutableStateOf("codex") }
     var gitReviewDialog by remember { mutableStateOf(false) }
+    var showCoolifyDialog by remember { mutableStateOf(false) }
     var showSlmManagerDialog by remember { mutableStateOf(false) }
     var pickerExpanded by remember { mutableStateOf(false) }
     var prompt by rememberSaveable { mutableStateOf("") }
@@ -254,6 +256,48 @@ fun TabletAgentApp() {
             }.onSuccess {
                 error = "Applied code to $path (Git checkpoint saved)"
             }.onFailure { notify(it) }
+        }
+    }
+
+    val openFileInWorkspaceHandler: (String) -> Unit = { path ->
+        scope.launch {
+            runCatching { api.file(selectedProject, path) }
+                .onSuccess {
+                    fileName = path
+                    fileBody = it.optString("content", "")
+                    tab = 3
+                }
+                .onFailure { notify(it) }
+        }
+    }
+
+    val retryLastPromptHandler: () -> Unit = {
+        val lastPrompt = events.lastOrNull {
+            it.optString("type") == "user.message"
+        }?.optJSONObject("payload")?.optString("text", "")
+            ?.ifBlank { null }
+            ?: tasks.firstOrNull { it.optString("id") == selectedTask }?.optString("prompt", "")
+            ?: ""
+        if (lastPrompt.isNotBlank() && online && token.isNotBlank() && selectedProject.isNotBlank()) {
+            scope.launch {
+                try {
+                    val continueTid = if (isNewChatMode) "" else selectedTask
+                    val t = api.startTask(
+                        selectedProject,
+                        lastPrompt,
+                        mode,
+                        selectedAgent,
+                        if (selectedModel == "default") "" else selectedModel,
+                        continueTid
+                    )
+                    val taskId = t.getString("id")
+                    selectedTask = taskId
+                    isNewChatMode = false
+                    AgentForegroundService.start(context, taskId, selectedProject, mode.uppercase(), lastPrompt)
+                    error = ""
+                    tasks = api.tasks(selectedProject).objects()
+                } catch (e: Exception) { notify(e) }
+            }
         }
     }
 
@@ -509,6 +553,7 @@ fun TabletAgentApp() {
                             if (nextView == 2) sidebarOpen = false
                         },
                         onOpenGit = { gitReviewDialog = true },
+                        onOpenCoolify = { showCoolifyDialog = true },
                         onOpenSlm = { showSlmManagerDialog = true },
                         apks = detectedApks,
                         onInstallApk = launchInstallApk,
@@ -634,7 +679,9 @@ fun TabletAgentApp() {
                                 onExportProject = doExportProject,
                                 onViewMemory = doViewMemory,
                                 onUploadAttachment = uploadAttachmentHandler,
-                                onApplyCode = applyCodeHandler
+                                onApplyCode = applyCodeHandler,
+                                onRetryLastPrompt = retryLastPromptHandler,
+                                onOpenFileInWorkspace = openFileInWorkspaceHandler
                             )
                             1 -> BoxWithConstraints(Modifier.fillMaxSize()) {
                                 val density = LocalDensity.current
@@ -706,7 +753,9 @@ fun TabletAgentApp() {
                                             onExportProject = doExportProject,
                                             onViewMemory = doViewMemory,
                                             onUploadAttachment = uploadAttachmentHandler,
-                                            onApplyCode = applyCodeHandler
+                                            onApplyCode = applyCodeHandler,
+                                            onRetryLastPrompt = retryLastPromptHandler,
+                                            onOpenFileInWorkspace = openFileInWorkspaceHandler
                                         )
                                     }
 
@@ -891,6 +940,7 @@ fun TabletAgentApp() {
                             authBusy = false
                         }
                     },
+                    onRefreshKeySummary = { keySummary = SecureSecrets.getSummary(context) },
                     notify = notify
                 )
                 5 -> InteractivePtyTerminal(
@@ -1157,6 +1207,22 @@ fun TabletAgentApp() {
             api = api,
             onDismiss = { showSlmManagerDialog = false },
             notify = notify
+        )
+    }
+    if (showCoolifyDialog) {
+        CoolifyDialog(
+            api = api,
+            selectedProject = selectedProject,
+            onDismiss = { showCoolifyDialog = false },
+            onOpenSettings = {
+                showCoolifyDialog = false
+                tab = 4
+            },
+            onSendDeployPrompt = { deployPrompt ->
+                showCoolifyDialog = false
+                tab = 0
+                prompt = deployPrompt
+            }
         )
     }
 }
@@ -2275,6 +2341,7 @@ private fun SettingsScreen(
     onSignInCli: (String) -> Unit = {},
     onSignOutCli: (String) -> Unit = {},
     onSaveProviderKey: (String, String) -> Unit = { _, _ -> },
+    onRefreshKeySummary: () -> Unit = {},
     notify: (Throwable) -> Unit = {}
 ) {
     val context = LocalContext.current
@@ -2483,6 +2550,111 @@ private fun SettingsScreen(
                         busy = authBusy,
                         onSaveKey = onSaveProviderKey
                     )
+
+                    // Coolify Integration Settings Card
+                    var coolifyUrlInput by remember(keySummary.coolifyUrl) { mutableStateOf(keySummary.coolifyUrl) }
+                    var coolifyTokenInput by remember { mutableStateOf("") }
+                    var coolifyBusy by remember { mutableStateOf(false) }
+                    var coolifyTestResult by remember { mutableStateOf("") }
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.RocketLaunch, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text("Coolify Deployment Integration", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                                Spacer(Modifier.weight(1f))
+                                Surface(
+                                    color = if (keySummary.coolifyConfigured) Color(0xFF065F46) else MaterialTheme.colorScheme.surface,
+                                    shape = RoundedCornerShape(6.dp)
+                                ) {
+                                    Text(
+                                        if (keySummary.coolifyConfigured) "Configured (${keySummary.coolifyTokenHint})" else "Not Configured",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (keySummary.coolifyConfigured) Color(0xFFD1FAE5) else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                    )
+                                }
+                            }
+                            Text(
+                                "Connect your Coolify v4 instance so the agent can inspect project deployments & redacted error logs without exposing your API token.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            OutlinedTextField(
+                                value = coolifyUrlInput,
+                                onValueChange = { coolifyUrlInput = it },
+                                label = { Text("Coolify URL (e.g. https://coolify.example.com)") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            OutlinedTextField(
+                                value = coolifyTokenInput,
+                                onValueChange = { coolifyTokenInput = it },
+                                label = { Text(if (keySummary.coolifyConfigured) "API Token (leave blank to keep ${keySummary.coolifyTokenHint})" else "Coolify API Token (Bearer)") },
+                                singleLine = true,
+                                visualTransformation = PasswordVisualTransformation(),
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Button(
+                                    enabled = !coolifyBusy && coolifyUrlInput.isNotBlank(),
+                                    onClick = {
+                                        val u = coolifyUrlInput.trim().trimEnd('/')
+                                        val t = coolifyTokenInput.trim()
+                                        SecureSecrets.saveKey(context, SecureSecrets.KEY_COOLIFY_URL, u)
+                                        if (t.isNotBlank()) {
+                                            SecureSecrets.saveKey(context, SecureSecrets.KEY_COOLIFY_TOKEN, t)
+                                            coolifyTokenInput = ""
+                                        }
+                                        onRefreshKeySummary()
+                                        coolifyTestResult = "Saved to Android KeyStore"
+                                    }
+                                ) {
+                                    Text("Save Coolify")
+                                }
+                                OutlinedButton(
+                                    enabled = !coolifyBusy && api != null && online && coolifyUrlInput.isNotBlank(),
+                                    onClick = {
+                                        val u = coolifyUrlInput.trim().trimEnd('/')
+                                        val t = coolifyTokenInput.trim().ifBlank {
+                                            SecureSecrets.getKey(context, SecureSecrets.KEY_COOLIFY_TOKEN)
+                                        }
+                                        if (t.isBlank()) {
+                                            coolifyTestResult = "Enter or save an API token first"
+                                            return@OutlinedButton
+                                        }
+                                        coolifyBusy = true
+                                        coolifyTestResult = "Testing connection..."
+                                        scope.launch {
+                                            runCatching { api!!.coolifyTest(u, t) }
+                                                .onSuccess { res ->
+                                                    val ver = res.optString("version", "ok")
+                                                    coolifyTestResult = "Connected! Coolify $ver"
+                                                }
+                                                .onFailure { e ->
+                                                    coolifyTestResult = "Error: ${e.message ?: e.javaClass.simpleName}"
+                                                }
+                                            coolifyBusy = false
+                                        }
+                                    }
+                                ) {
+                                    Text("Test Connection")
+                                }
+                            }
+                            if (coolifyTestResult.isNotBlank()) {
+                                Text(
+                                    coolifyTestResult,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (coolifyTestResult.startsWith("Connected") || coolifyTestResult.startsWith("Saved"))
+                                        MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.error
+                                )
+                            }
+                        }
+                    }
 
                     if (agents.isNotEmpty()) {
                         Row(

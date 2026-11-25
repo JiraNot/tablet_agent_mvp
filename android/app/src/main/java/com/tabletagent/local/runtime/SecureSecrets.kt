@@ -20,7 +20,10 @@ data class ProviderKeySummary(
     val githubConfigured: Boolean = false,
     val githubHint: String = "",
     val githubUser: String = "",
-    val githubEmail: String = ""
+    val githubEmail: String = "",
+    val coolifyConfigured: Boolean = false,
+    val coolifyUrl: String = "",
+    val coolifyTokenHint: String = ""
 )
 
 /**
@@ -35,6 +38,8 @@ object SecureSecrets {
     const val KEY_GITHUB = "GITHUB_TOKEN"
     const val KEY_GITHUB_USER = "GITHUB_USER"
     const val KEY_GITHUB_EMAIL = "GITHUB_EMAIL"
+    const val KEY_COOLIFY_URL = "COOLIFY_URL"
+    const val KEY_COOLIFY_TOKEN = "COOLIFY_API_TOKEN"
 
     private const val ALIAS = "tablet_agent_provider_secrets_key"
     private const val STORE = "tablet_agent_provider_secrets"
@@ -112,7 +117,10 @@ object SecureSecrets {
             githubConfigured = hasKey(context, KEY_GITHUB),
             githubHint = maskedHint(context, KEY_GITHUB),
             githubUser = getKey(context, KEY_GITHUB_USER),
-            githubEmail = getKey(context, KEY_GITHUB_EMAIL)
+            githubEmail = getKey(context, KEY_GITHUB_EMAIL),
+            coolifyConfigured = hasKey(context, KEY_COOLIFY_URL) && hasKey(context, KEY_COOLIFY_TOKEN),
+            coolifyUrl = getKey(context, KEY_COOLIFY_URL),
+            coolifyTokenHint = maskedHint(context, KEY_COOLIFY_TOKEN)
         )
     }
 

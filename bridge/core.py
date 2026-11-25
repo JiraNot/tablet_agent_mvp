@@ -528,6 +528,7 @@ class LocalCore:
         self.task_queues: dict[str, list[dict[str, Any]]] = {}
         self.active_worktrees: dict[str, Path] = {}
         self.live_streams: dict[str, dict[str, Any]] = {}
+        self.coolify_context_cache: dict[str, str] = {}
         self.adapters: dict[str, BaseAgentAdapter] = {
             'codex': CodexAdapter(),
             'claude': ClaudeCodeAdapter(),
@@ -1980,9 +1981,10 @@ class LocalCore:
                     except Exception:
                         pass
             memory_ctx = HermesMemoryLedger.build_context(project_path)
+            coolify_ctx = self.coolify_context_cache.get(project_name, '')
             thread = self._thread_for_project(project_name, agent_name)
             effective_prompt = turn_prompt if (turn_prompt and turn_prompt.strip()) else rec['prompt']
-            prompt_text = f'{policy}{instructions}{memory_ctx}\n\nUser task:\n{effective_prompt}'
+            prompt_text = f'{policy}{instructions}{memory_ctx}{coolify_ctx}\n\nUser task:\n{effective_prompt}'
             settings = self.get_settings()
             sandbox_override = 'danger-full-access' if (agent_name == 'codex' and mode == 'build' and settings.get('codex_proot_sandbox_bypass')) else None
             use_app_server = bool(agent_name == 'codex' and isinstance(adapter, CodexAdapter) and settings.get('codex_use_app_server'))
@@ -3402,3 +3404,189 @@ class LocalCore:
             'sw_created': True,
             'index_injected': injected
         }
+
+    # ---- Coolify REST API v1 Integration (Secret-Safe) ----
+
+    @staticmethod
+    def _coolify_base_url(raw_url: str) -> str:
+        u_str = (raw_url or '').strip()
+        if not u_str:
+            raise BridgeError('Coolify URL is required', 400)
+        if '://' not in u_str:
+            u_str = 'https://' + u_str
+        u = urlparse(u_str)
+        if u.scheme not in {'http', 'https'} or not u.hostname:
+            raise BridgeError('Invalid Coolify URL', 400)
+        return f'{u.scheme}://{u.netloc}'
+
+    def _coolify_request(self, base_url: str, token: str, path: str, method: str = 'GET') -> Any:
+        import urllib.request
+        import urllib.error
+        clean_url = self._coolify_base_url(base_url)
+        tok = (token or '').strip() or os.environ.get('COOLIFY_API_TOKEN', '').strip()
+        if not tok:
+            raise BridgeError('Coolify API token is required. Configure it in Settings.', 401)
+        req = urllib.request.Request(
+            f'{clean_url}/api/v1{path}',
+            headers={
+                'Authorization': f'Bearer {tok}',
+                'Accept': 'application/json',
+                'User-Agent': 'TabletAgentStudio/0.1',
+            },
+            method=method
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                raw = resp.read().decode('utf-8', errors='replace')
+                if not raw.strip():
+                    return {}
+                try:
+                    return json.loads(raw)
+                except ValueError:
+                    return {'raw': raw[:4000]}
+        except urllib.error.HTTPError as he:
+            body = he.read().decode('utf-8', errors='replace')
+            clean_err = REDACTION.sub('[REDACTED]', body[:300])
+            raise BridgeError(f'Coolify API HTTP {he.code}: {clean_err}', he.code)
+        except Exception as e:
+            raise BridgeError(f'Coolify connection failed: {e}', 502)
+
+    def coolify_test(self, url: str = '', token: str = '') -> dict[str, Any]:
+        base_url = (url or '').strip() or os.environ.get('COOLIFY_URL', '').strip()
+        res = self._coolify_request(base_url, token, '/version')
+        version = res.get('raw', str(res)) if isinstance(res, dict) else str(res)
+        return {'ok': True, 'version': version[:120], 'url': self._coolify_base_url(base_url)}
+
+    def coolify_overview(self, url: str = '', token: str = '', project: str = '') -> dict[str, Any]:
+        base_url = (url or '').strip() or os.environ.get('COOLIFY_URL', '').strip()
+        apps_raw = self._coolify_request(base_url, token, '/applications')
+        dbs_raw = []
+        try:
+            dbs_raw = self._coolify_request(base_url, token, '/databases')
+        except BridgeError:
+            dbs_raw = []
+
+        origin_slug = ''
+        proj_lower = (project or '').strip().lower()
+        if project:
+            try:
+                p_dir = self._project(project)
+                git_cmd = shutil.which('git') or 'git'
+                if (p_dir / '.git').exists():
+                    r = subprocess.run([git_cmd, 'remote', 'get-url', 'origin'], cwd=p_dir, capture_output=True, text=True, timeout=5)
+                    if r.returncode == 0:
+                        m = re.search(r'github\.com[:/]([^/]+/[^/\s]+?)(?:\.git)?/?$', r.stdout.strip())
+                        if m:
+                            origin_slug = m.group(1).lower()
+            except Exception:
+                pass
+
+        apps: list[dict[str, Any]] = []
+        if isinstance(apps_raw, list):
+            for a in apps_raw:
+                if not isinstance(a, dict):
+                    continue
+                git_repo = str(a.get('git_repository') or '')
+                app_name = str(a.get('name') or '')
+                matched = False
+                if origin_slug and origin_slug in git_repo.lower():
+                    matched = True
+                elif proj_lower and (proj_lower == app_name.lower() or proj_lower in git_repo.lower()):
+                    matched = True
+                apps.append({
+                    'uuid': str(a.get('uuid') or ''),
+                    'name': app_name,
+                    'fqdn': str(a.get('fqdn') or ''),
+                    'git_repository': git_repo,
+                    'git_branch': str(a.get('git_branch') or ''),
+                    'build_pack': str(a.get('build_pack') or ''),
+                    'status': str(a.get('status') or ''),
+                    'matched': matched,
+                })
+        apps.sort(key=lambda x: (not x['matched'], x['name'].lower()))
+
+        databases: list[dict[str, Any]] = []
+        if isinstance(dbs_raw, list):
+            for d in dbs_raw:
+                if not isinstance(d, dict):
+                    continue
+                databases.append({
+                    'uuid': str(d.get('uuid') or ''),
+                    'name': str(d.get('name') or ''),
+                    'type': str(d.get('type') or ''),
+                    'status': str(d.get('status') or ''),
+                })
+
+        if project:
+            matched_apps = [a for a in apps if a['matched']]
+            if matched_apps:
+                lines = ['\n\nCoolify Deployment Context (secret-free):']
+                for ma in matched_apps[:3]:
+                    lines.append(
+                        f"- App '{ma['name']}' (uuid={ma['uuid']}): status={ma['status']}, "
+                        f"url={ma['fqdn']}, branch={ma['git_branch']}, build_pack={ma['build_pack']}, repo={ma['git_repository']}"
+                    )
+                if databases:
+                    db_names = ', '.join(f"{d['name']} ({d['type']}: {d['status']})" for d in databases[:5])
+                    lines.append(f"- Coolify Databases: {db_names}")
+                self.coolify_context_cache[project] = '\n'.join(lines)
+
+        return {'apps': apps, 'databases': databases, 'matched_count': sum(1 for a in apps if a['matched'])}
+
+    def coolify_deployments(self, url: str = '', token: str = '', app_uuid: str = '') -> dict[str, Any]:
+        base_url = (url or '').strip() or os.environ.get('COOLIFY_URL', '').strip()
+        uid = re.sub(r'[^a-zA-Z0-9_-]', '', (app_uuid or '').strip())
+        if not uid:
+            raise BridgeError('Application UUID is required', 400)
+        res = self._coolify_request(base_url, token, f'/deployments/applications/{uid}')
+        items_raw = res.get('deployments', []) if isinstance(res, dict) else (res if isinstance(res, list) else [])
+        deployments = []
+        for d in items_raw[:15]:
+            if not isinstance(d, dict):
+                continue
+            deployments.append({
+                'deployment_uuid': str(d.get('deployment_uuid') or d.get('uuid') or ''),
+                'status': str(d.get('status') or ''),
+                'commit': str(d.get('commit') or '')[:12],
+                'created_at': str(d.get('created_at') or ''),
+                'is_webhook': bool(d.get('is_webhook', False)),
+            })
+        return {'deployments': deployments}
+
+    def coolify_deployment_logs(self, url: str = '', token: str = '', deployment_uuid: str = '') -> dict[str, Any]:
+        base_url = (url or '').strip() or os.environ.get('COOLIFY_URL', '').strip()
+        duid = re.sub(r'[^a-zA-Z0-9_-]', '', (deployment_uuid or '').strip())
+        if not duid:
+            raise BridgeError('Deployment UUID is required', 400)
+        res = self._coolify_request(base_url, token, f'/deployments/{duid}')
+        raw_logs = res.get('logs', '') if isinstance(res, dict) else ''
+        log_lines: list[str] = []
+        if isinstance(raw_logs, str) and raw_logs.strip():
+            try:
+                parsed = json.loads(raw_logs)
+                if isinstance(parsed, list):
+                    for entry in parsed:
+                        if isinstance(entry, dict) and entry.get('output'):
+                            log_lines.append(str(entry['output']))
+                else:
+                    log_lines = raw_logs.splitlines()
+            except ValueError:
+                log_lines = raw_logs.splitlines()
+        elif isinstance(raw_logs, list):
+            for entry in raw_logs:
+                if isinstance(entry, dict) and entry.get('output'):
+                    log_lines.append(str(entry['output']))
+        joined = REDACTION.sub('[REDACTED]', '\n'.join(log_lines[-160:]))
+        return {
+            'deployment_uuid': duid,
+            'status': str(res.get('status', '')) if isinstance(res, dict) else '',
+            'logs': joined[-16000:],
+        }
+
+    def coolify_deploy(self, url: str = '', token: str = '', app_uuid: str = '') -> dict[str, Any]:
+        base_url = (url or '').strip() or os.environ.get('COOLIFY_URL', '').strip()
+        uid = re.sub(r'[^a-zA-Z0-9_-]', '', (app_uuid or '').strip())
+        if not uid:
+            raise BridgeError('Application UUID is required', 400)
+        res = self._coolify_request(base_url, token, f'/deploy?uuid={uid}&force=false', method='POST')
+        return {'success': True, 'response': res}

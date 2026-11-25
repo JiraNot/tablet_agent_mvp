@@ -56,7 +56,9 @@ import android.speech.RecognizerIntent
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import java.util.Locale
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -660,6 +662,7 @@ fun ClaudeCodeTopBar(
     workspaceView: Int,
     onSelectWorkspaceView: (Int) -> Unit,
     onOpenGit: () -> Unit,
+    onOpenCoolify: () -> Unit = {},
     onOpenSlm: () -> Unit = {},
     apks: List<JSONObject> = emptyList(),
     onInstallApk: (String) -> Unit = {},
@@ -667,7 +670,9 @@ fun ClaudeCodeTopBar(
     onViewMemory: () -> Unit = {},
     onUploadAttachment: (suspend (String, String) -> String?)? = null,
     onApplyCode: ((filename: String, code: String) -> Unit)? = null,
-    liveStream: JSONObject? = null
+    liveStream: JSONObject? = null,
+    onRetryLastPrompt: (() -> Unit)? = null,
+    onOpenFileInWorkspace: ((String) -> Unit)? = null
 ) {
     Surface(
         color = MaterialTheme.colorScheme.surface,
@@ -865,6 +870,23 @@ fun ClaudeCodeTopBar(
                             Icon(
                                 Icons.Default.Commit,
                                 contentDescription = "Git",
+                                modifier = Modifier.size(14.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        // Compact Icon Button for Coolify Deployments
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier
+                                .size(28.dp)
+                                .clip(RoundedCornerShape(7.dp))
+                                .background(MaterialTheme.colorScheme.surfaceVariant)
+                                .clickable { onOpenCoolify() }
+                        ) {
+                            Icon(
+                                Icons.Default.RocketLaunch,
+                                contentDescription = "Coolify",
                                 modifier = Modifier.size(14.dp),
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -1222,7 +1244,9 @@ fun AionClaudeAgentPane(
     onViewMemory: () -> Unit = {},
     onUploadAttachment: (suspend (String, String) -> String?)? = null,
     onApplyCode: ((filename: String, code: String) -> Unit)? = null,
-    liveStream: JSONObject? = null
+    liveStream: JSONObject? = null,
+    onRetryLastPrompt: (() -> Unit)? = null,
+    onOpenFileInWorkspace: ((String) -> Unit)? = null
 ) {
     val rawAgents = if (agents.isNotEmpty()) agents.map {
         Triple(it.optString("name"), it.optString("display_name"), it.optBoolean("available", true))
@@ -2531,7 +2555,8 @@ fun AionClaudeAgentPane(
                         is ChatTurnItem.ToolBatch -> {
                             ToolBatchAccordionCard(
                                 batch = turn,
-                                isTaskRunning = isRunning && turn == groupedTurns.lastOrNull()
+                                isTaskRunning = isRunning && turn == groupedTurns.lastOrNull(),
+                                onOpenFileInWorkspace = onOpenFileInWorkspace
                             )
                         }
 
@@ -2618,8 +2643,31 @@ fun AionClaudeAgentPane(
                                 Text(
                                     turn.text,
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onErrorContainer
+                                    color = MaterialTheme.colorScheme.onErrorContainer,
+                                    modifier = Modifier.weight(1f)
                                 )
+                                if (onRetryLastPrompt != null && !isRunning) {
+                                    Spacer(Modifier.width(8.dp))
+                                    TextButton(
+                                        onClick = { onRetryLastPrompt() },
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                        modifier = Modifier.height(28.dp)
+                                    ) {
+                                        Icon(
+                                            Icons.Default.Refresh,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(13.dp),
+                                            tint = MaterialTheme.colorScheme.error
+                                        )
+                                        Spacer(Modifier.width(4.dp))
+                                        Text(
+                                            "Retry",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.error
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
@@ -3004,7 +3052,8 @@ fun AionClaudeAgentPane(
 @Composable
 private fun ToolBatchAccordionCard(
     batch: ChatTurnItem.ToolBatch,
-    isTaskRunning: Boolean
+    isTaskRunning: Boolean,
+    onOpenFileInWorkspace: ((String) -> Unit)? = null
 ) {
     var expanded by rememberSaveable(batch.id) { mutableStateOf(false) }
     val statusLabel = if (isTaskRunning) "running" else batch.latestStatusLabel
@@ -3090,16 +3139,26 @@ private fun ToolBatchAccordionCard(
             ) {
                 HorizontalDivider(color = MaterialTheme.colorScheme.primary.copy(alpha = 0.18f))
                 batch.toolRows.forEach { row ->
+                    val filePathMatch = remember(row.name) {
+                        if (row.name.startsWith("file_change")) {
+                            Regex("`([^`]+)`").find(row.name)?.groupValues?.getOrNull(1)?.trim()
+                        } else null
+                    }
+                    val canOpenFile = !filePathMatch.isNullOrBlank() && onOpenFileInWorkspace != null
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(6.dp))
                             .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.72f))
+                            .then(
+                                if (canOpenFile) Modifier.clickable { onOpenFileInWorkspace?.invoke(filePathMatch!!) }
+                                else Modifier
+                            )
                             .padding(horizontal = 8.dp, vertical = 4.dp)
                     ) {
                         Icon(
-                            Icons.Default.Code,
+                            if (canOpenFile) Icons.Default.Description else Icons.Default.Code,
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.size(12.dp)
@@ -3116,6 +3175,15 @@ private fun ToolBatchAccordionCard(
                             overflow = TextOverflow.Ellipsis
                         )
                         Spacer(Modifier.width(6.dp))
+                        if (canOpenFile) {
+                            Icon(
+                                Icons.Default.OpenInNew,
+                                contentDescription = "Open file",
+                                tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.75f),
+                                modifier = Modifier.size(12.dp)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                        }
                         Text(
                             row.status,
                             style = MaterialTheme.typography.labelSmall,
@@ -3322,6 +3390,42 @@ private fun StreamingAssistantMessageCard(
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.primary
                 )
+            }
+            Spacer(Modifier.weight(1f))
+            if (fullText.isNotBlank()) {
+                val clipboard = LocalClipboardManager.current
+                var copiedMsg by remember(turn.key) { mutableStateOf(false) }
+                LaunchedEffect(copiedMsg) {
+                    if (copiedMsg) {
+                        kotlinx.coroutines.delay(1500)
+                        copiedMsg = false
+                    }
+                }
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .clickable {
+                            clipboard.setText(AnnotatedString(fullText))
+                            copiedMsg = true
+                        }
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                ) {
+                    Icon(
+                        if (copiedMsg) Icons.Default.Check else Icons.Default.ContentCopy,
+                        contentDescription = "Copy response",
+                        modifier = Modifier.size(13.dp),
+                        tint = if (copiedMsg) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (copiedMsg) {
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            "Copied",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.tertiary
+                        )
+                    }
+                }
             }
         }
         Spacer(Modifier.height(4.dp))

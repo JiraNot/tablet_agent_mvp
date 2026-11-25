@@ -221,6 +221,19 @@ class Handler(BaseHTTPRequestHandler):
             if len(seg)>=4 and seg[3]=='pwa':
                 if len(seg)==5 and seg[4]=='configure' and method=='POST':
                     return self.reply(200,self.core.pwa_configure(name))
+        if len(seg)==3 and seg[0]=='v1' and seg[1]=='coolify' and method=='POST':
+            obj=self._body()
+            u, t = str(obj.get('url','')), str(obj.get('token',''))
+            if seg[2]=='test':
+                return self.reply(200,self.core.coolify_test(u, t))
+            if seg[2]=='overview':
+                return self.reply(200,self.core.coolify_overview(u, t, str(obj.get('project',''))))
+            if seg[2]=='deployments':
+                return self.reply(200,self.core.coolify_deployments(u, t, str(obj.get('app_uuid',''))))
+            if seg[2]=='deployment-logs':
+                return self.reply(200,self.core.coolify_deployment_logs(u, t, str(obj.get('deployment_uuid',''))))
+            if seg[2]=='deploy':
+                return self.reply(200,self.core.coolify_deploy(u, t, str(obj.get('app_uuid',''))))
         raise BridgeError('Endpoint not found',404)
 
     def handle_one_request(self):
