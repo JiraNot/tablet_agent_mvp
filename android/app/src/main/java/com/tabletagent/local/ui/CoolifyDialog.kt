@@ -3,12 +3,15 @@ package com.tabletagent.local.ui
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -119,27 +122,40 @@ fun CoolifyDialog(
         if (uid.isNotBlank()) loadDeployments(uid)
     }
 
-    AlertDialog(
+    Dialog(
         onDismissRequest = onDismiss,
-        modifier = Modifier.fillMaxWidth(0.94f).fillMaxHeight(0.88f),
-        title = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.RocketLaunch, contentDescription = null, tint = Color(0xFF8B5CF6), modifier = Modifier.size(22.dp))
-                Spacer(Modifier.width(8.dp))
-                Column(Modifier.weight(1f)) {
-                    Text("Coolify Deploy & Logs", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                    if (coolifyUrl.isNotBlank()) {
-                        Text(coolifyUrl, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(0.92f).fillMaxHeight(0.88f),
+            shape = RoundedCornerShape(20.dp),
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 4.dp
+        ) {
+            Column(
+                modifier = Modifier.fillMaxSize().padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Default.RocketLaunch, contentDescription = null, tint = Color(0xFF7C3AED), modifier = Modifier.size(22.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("Coolify Deploy & Logs", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                        if (coolifyUrl.isNotBlank()) {
+                            Text(coolifyUrl, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                    if (isConfigured) {
+                        IconButton(onClick = { loadOverview() }, modifier = Modifier.size(32.dp)) {
+                            Icon(Icons.Default.Refresh, contentDescription = "Refresh", modifier = Modifier.size(18.dp))
+                        }
+                    }
+                    IconButton(onClick = onDismiss, modifier = Modifier.size(32.dp)) {
+                        Icon(Icons.Default.Close, contentDescription = "Close", modifier = Modifier.size(18.dp))
                     }
                 }
-                if (isConfigured) {
-                    IconButton(onClick = { loadOverview() }, modifier = Modifier.size(32.dp)) {
-                        Icon(Icons.Default.Refresh, contentDescription = "Refresh", modifier = Modifier.size(18.dp))
-                    }
-                }
-            }
-        },
-        text = {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
             if (!isConfigured) {
                 Column(
                     modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
@@ -345,8 +361,11 @@ fun CoolifyDialog(
 
                                     // Recent deployment selector chips
                                     if (deployments.isNotEmpty()) {
-                                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
-                                            deployments.take(4).forEach { dep ->
+                                        Row(
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+                                        ) {
+                                            deployments.take(6).forEach { dep ->
                                                 val duid = dep.optString("deployment_uuid")
                                                 val dStatus = dep.optString("status")
                                                 val isSelDep = selectedDeployUuid == duid
@@ -409,7 +428,7 @@ fun CoolifyDialog(
                                                 onDismiss()
                                                 onSendDeployPrompt(promptMsg)
                                             },
-                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7C3AED)),
+                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7C3AED), contentColor = Color.White),
                                             modifier = Modifier.fillMaxWidth().height(34.dp)
                                         ) {
                                             Icon(Icons.Default.AutoAwesome, null, modifier = Modifier.size(15.dp))
@@ -423,8 +442,8 @@ fun CoolifyDialog(
                     }
                 }
             }
-        },
-        confirmButton = {},
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Close") } }
-    )
+                }
+            }
+        }
+    }
 }
