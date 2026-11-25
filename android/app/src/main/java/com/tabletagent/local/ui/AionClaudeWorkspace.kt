@@ -672,7 +672,9 @@ fun ClaudeCodeTopBar(
     onApplyCode: ((filename: String, code: String) -> Unit)? = null,
     liveStream: JSONObject? = null,
     onRetryLastPrompt: (() -> Unit)? = null,
-    onOpenFileInWorkspace: ((String) -> Unit)? = null
+    onOpenFileInWorkspace: ((String) -> Unit)? = null,
+    onProceedPlan: (() -> Unit)? = null,
+    onSendPrompt: ((String) -> Unit)? = null
 ) {
     Surface(
         color = MaterialTheme.colorScheme.surface,
@@ -1246,7 +1248,9 @@ fun AionClaudeAgentPane(
     onApplyCode: ((filename: String, code: String) -> Unit)? = null,
     liveStream: JSONObject? = null,
     onRetryLastPrompt: (() -> Unit)? = null,
-    onOpenFileInWorkspace: ((String) -> Unit)? = null
+    onOpenFileInWorkspace: ((String) -> Unit)? = null,
+    onProceedPlan: (() -> Unit)? = null,
+    onSendPrompt: ((String) -> Unit)? = null
 ) {
     val rawAgents = if (agents.isNotEmpty()) agents.map {
         Triple(it.optString("name"), it.optString("display_name"), it.optBoolean("available", true))
@@ -1357,6 +1361,36 @@ fun AionClaudeAgentPane(
         }
     }
 
+    val uploadTextAsAttachment: (String) -> Unit = { rawText ->
+        val ts = java.text.SimpleDateFormat("HHmmss", Locale.US).format(java.util.Date())
+        val filename = "pasted_$ts.txt"
+        val bytes = rawText.toByteArray(Charsets.UTF_8)
+        val b64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+        scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val targetPath = if (onUploadAttachment != null) {
+                    onUploadAttachment(filename, b64) ?: ".agents/attachments/$filename"
+                } else {
+                    ".agents/attachments/$filename"
+                }
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    attachments = attachments + AttachmentItem(
+                        name = filename,
+                        path = targetPath,
+                        type = "document",
+                        sizeBytes = bytes.size.toLong(),
+                        uriString = ""
+                    )
+                    Toast.makeText(context, "Long text converted to $filename", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    Toast.makeText(context, "Failed to attach text: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
     val doSendWithAttachments = {
         var finalPrompt = prompt.trim()
         if (attachments.isNotEmpty()) {
@@ -1364,18 +1398,22 @@ fun AionClaudeAgentPane(
                 when (it.type) {
                     "image" -> "[Attachment Image: ${it.name}]"
                     "video" -> "[Attachment Video: ${it.name}]"
-                    "document" -> "[Attachment Document: ${it.name}]"
+                    "document" -> "[Attachment File: ${it.path}]"
                     else -> "[Attachment File: ${it.path}]"
                 }
             }
             val attStr = linesList.joinToString("\n")
             if (!finalPrompt.contains("[Attachment")) {
                 finalPrompt = if (finalPrompt.isBlank()) attStr else "$finalPrompt\n\n$attStr"
-                onPrompt(finalPrompt)
             }
             attachments = emptyList()
         }
-        onSend()
+        if (onSendPrompt != null) {
+            onSendPrompt(finalPrompt)
+        } else {
+            onPrompt(finalPrompt)
+            onSend()
+        }
     }
 
     if (showQuickAttachDialog) {
@@ -2728,6 +2766,88 @@ fun AionClaudeAgentPane(
             }
             }
 
+            // Plan Ready Action Card (Artifact + Proceed & Build)
+            if (currentTaskStatus == "PLANNED" && !isRunning) {
+                val planArtifactPath = remember(events) {
+                    events.lastOrNull { it.optString("kind") == "plan.artifact" }
+                        ?.optString("message", "")
+                        ?.ifBlank { null }
+                }
+                Surface(
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f),
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)),
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.AssignmentTurnedIn,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                "Plan Ready to Implement",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            if (planArtifactPath != null) {
+                                Text(
+                                    planArtifactPath,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.clickable(enabled = onOpenFileInWorkspace != null) {
+                                        onOpenFileInWorkspace?.invoke(planArtifactPath)
+                                    }
+                                )
+                            }
+                        }
+                        if (planArtifactPath != null && onOpenFileInWorkspace != null) {
+                            OutlinedButton(
+                                onClick = { onOpenFileInWorkspace(planArtifactPath) },
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                modifier = Modifier.height(30.dp)
+                            ) {
+                                Icon(Icons.Default.Description, null, modifier = Modifier.size(13.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("Artifact", style = MaterialTheme.typography.labelSmall)
+                            }
+                            Spacer(Modifier.width(6.dp))
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                if (prompt.isBlank()) onPrompt("Revise plan: ")
+                            },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            modifier = Modifier.height(30.dp)
+                        ) {
+                            Text("Revise", style = MaterialTheme.typography.labelSmall)
+                        }
+                        if (onProceedPlan != null) {
+                            Spacer(Modifier.width(6.dp))
+                            Button(
+                                onClick = { onProceedPlan() },
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                modifier = Modifier.height(30.dp)
+                            ) {
+                                Icon(Icons.Default.PlayArrow, null, modifier = Modifier.size(14.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("Proceed & Build", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+            }
+
             // Android App Builder Ready Card in active chat thread
             if (apks.isNotEmpty()) {
                 val firstApk = apks.first()
@@ -2964,7 +3084,18 @@ fun AionClaudeAgentPane(
                             }
                             BasicTextField(
                                 value = prompt,
-                                onValueChange = onPrompt,
+                                onValueChange = { newText ->
+                                    val delta = newText.length - prompt.length
+                                    val lineCount = newText.count { it == '\n' } + 1
+                                    val isLargePaste = delta >= 250 && (newText.length >= 500 || lineCount >= 10)
+                                    val isVeryLong = newText.length >= 1200 || lineCount >= 16
+                                    if (onUploadAttachment != null && (isLargePaste || isVeryLong)) {
+                                        onPrompt("")
+                                        uploadTextAsAttachment(newText)
+                                    } else {
+                                        onPrompt(newText)
+                                    }
+                                },
                                 textStyle = MaterialTheme.typography.bodyMedium.copy(
                                     color = MaterialTheme.colorScheme.onSurface
                                 ),

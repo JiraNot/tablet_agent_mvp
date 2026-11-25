@@ -271,10 +271,60 @@ fun TabletAgentApp() {
         }
     }
 
+    val sendPromptHandler: (String) -> Unit = { textToSend ->
+        val cleanText = textToSend.trim()
+        if (cleanText.isNotBlank() && online && token.isNotBlank() && selectedProject.isNotBlank()) {
+            scope.launch {
+                try {
+                    val continueTid = if (isNewChatMode) "" else selectedTask
+                    val t = api.startTask(
+                        selectedProject,
+                        cleanText,
+                        mode,
+                        selectedAgent,
+                        if (selectedModel == "default") "" else selectedModel,
+                        continueTid
+                    )
+                    val taskId = t.getString("id")
+                    selectedTask = taskId
+                    isNewChatMode = false
+                    AgentForegroundService.start(context, taskId, selectedProject, mode.uppercase(), cleanText)
+                    prompt = ""; error = ""
+                    tasks = api.tasks(selectedProject).objects()
+                } catch (e: Exception) { notify(e) }
+            }
+        }
+    }
+
+    val proceedPlanHandler: () -> Unit = {
+        if (online && token.isNotBlank() && selectedProject.isNotBlank() && selectedTask.isNotBlank()) {
+            mode = "build"
+            val execPrompt = "Proceed with the approved plan and implement all steps."
+            scope.launch {
+                try {
+                    val t = api.startTask(
+                        selectedProject,
+                        execPrompt,
+                        "build",
+                        selectedAgent,
+                        if (selectedModel == "default") "" else selectedModel,
+                        selectedTask
+                    )
+                    val taskId = t.getString("id")
+                    selectedTask = taskId
+                    isNewChatMode = false
+                    AgentForegroundService.start(context, taskId, selectedProject, "BUILD", execPrompt)
+                    error = ""
+                    tasks = api.tasks(selectedProject).objects()
+                } catch (e: Exception) { notify(e) }
+            }
+        }
+    }
+
     val retryLastPromptHandler: () -> Unit = {
         val lastPrompt = events.lastOrNull {
-            it.optString("type") == "user.message"
-        }?.optJSONObject("payload")?.optString("text", "")
+            it.optString("kind") == "user"
+        }?.optString("message", "")
             ?.ifBlank { null }
             ?: tasks.firstOrNull { it.optString("id") == selectedTask }?.optString("prompt", "")
             ?: ""
@@ -681,7 +731,9 @@ fun TabletAgentApp() {
                                 onUploadAttachment = uploadAttachmentHandler,
                                 onApplyCode = applyCodeHandler,
                                 onRetryLastPrompt = retryLastPromptHandler,
-                                onOpenFileInWorkspace = openFileInWorkspaceHandler
+                                onOpenFileInWorkspace = openFileInWorkspaceHandler,
+                                onProceedPlan = proceedPlanHandler,
+                                onSendPrompt = sendPromptHandler
                             )
                             1 -> BoxWithConstraints(Modifier.fillMaxSize()) {
                                 val density = LocalDensity.current
@@ -755,7 +807,9 @@ fun TabletAgentApp() {
                                             onUploadAttachment = uploadAttachmentHandler,
                                             onApplyCode = applyCodeHandler,
                                             onRetryLastPrompt = retryLastPromptHandler,
-                                            onOpenFileInWorkspace = openFileInWorkspaceHandler
+                                            onOpenFileInWorkspace = openFileInWorkspaceHandler,
+                                            onProceedPlan = proceedPlanHandler,
+                                            onSendPrompt = sendPromptHandler
                                         )
                                     }
 

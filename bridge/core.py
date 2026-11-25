@@ -2034,6 +2034,24 @@ class LocalCore:
                 self.set_status(task_id,'FAILED',error=f'{adapter.display_name} exited with status {rc}',result=output);return
             self._remember_thread(project_name,task_id, agent_name)
             if mode=='plan':
+                if output and output.strip():
+                    try:
+                        plans_dir = project_path / '.agents' / 'plans'
+                        plans_dir.mkdir(parents=True, exist_ok=True)
+                        rel_plan = f'.agents/plans/plan_{task_id}.md'
+                        plan_file = project_path / rel_plan
+                        clean_plan = REDACTION.sub('[REDACTED]', output.strip())
+                        plan_md = (
+                            f"# Implementation Plan ({task_id})\n\n"
+                            f"- **Project:** {project_name}\n"
+                            f"- **Agent:** {agent_name}\n"
+                            f"- **Prompt:** {rec['prompt'].strip()}\n\n"
+                            f"---\n\n{clean_plan}\n"
+                        )
+                        plan_file.write_text(plan_md, encoding='utf-8')
+                        self.append(task_id, 'plan.artifact', rel_plan)
+                    except Exception:
+                        pass
                 self.set_status(task_id,'PLANNED',result=output);return
             self.set_status(task_id,'VERIFYING',result=output)
             command, needs_install = self._detect_verify_command(project_path)
