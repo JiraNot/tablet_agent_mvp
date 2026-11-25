@@ -53,6 +53,8 @@ fun CoolifyDialog(
     var deployStatus by remember { mutableStateOf("") }
     var loadingLogs by remember { mutableStateOf(false) }
     var redeploying by remember { mutableStateOf(false) }
+    var linkingBusy by remember { mutableStateOf(false) }
+    var linkedUuid by remember { mutableStateOf("") }
     var actionBanner by remember { mutableStateOf("") }
 
     fun loadOverview() {
@@ -67,9 +69,12 @@ fun CoolifyDialog(
                     val list = if (arr != null) (0 until arr.length()).map { arr.getJSONObject(it) } else emptyList()
                     apps = list
                     databases = if (dbArr != null) (0 until dbArr.length()).map { dbArr.getJSONObject(it) } else emptyList()
-                    val autoMatched = list.firstOrNull { it.optBoolean("matched", false) } ?: list.firstOrNull()
-                    if (autoMatched != null && selectedApp == null) {
-                        selectedApp = autoMatched
+                    linkedUuid = res.optString("linked_uuid", "")
+                    val preferred = list.firstOrNull { it.optBoolean("linked", false) }
+                        ?: list.firstOrNull { it.optBoolean("matched", false) }
+                        ?: list.firstOrNull()
+                    if (preferred != null && selectedApp == null) {
+                        selectedApp = preferred
                     }
                 }
                 .onFailure { errorMsg = it.message ?: "Failed to load Coolify overview" }
@@ -184,12 +189,17 @@ fun CoolifyDialog(
                                 items(apps, key = { it.optString("uuid") }) { app ->
                                     val uid = app.optString("uuid")
                                     val isSel = selectedApp?.optString("uuid") == uid
+                                    val isLinked = (linkedUuid.isNotBlank() && uid == linkedUuid) || app.optBoolean("linked", false)
                                     val matched = app.optBoolean("matched", false)
                                     val st = app.optString("status", "")
                                     Surface(
                                         color = if (isSel) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
                                         shape = RoundedCornerShape(8.dp),
-                                        border = if (matched) BorderStroke(1.dp, Color(0xFF10B981)) else null,
+                                        border = when {
+                                            isLinked -> BorderStroke(1.5.dp, Color(0xFF8B5CF6))
+                                            matched -> BorderStroke(1.dp, Color(0xFF10B981))
+                                            else -> null
+                                        },
                                         modifier = Modifier.fillMaxWidth().clickable { selectedApp = app }
                                     ) {
                                         Column(Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -202,9 +212,13 @@ fun CoolifyDialog(
                                                     overflow = TextOverflow.Ellipsis,
                                                     modifier = Modifier.weight(1f)
                                                 )
-                                                if (matched) {
+                                                if (isLinked) {
+                                                    Surface(color = Color(0xFF8B5CF6).copy(alpha = 0.2f), shape = RoundedCornerShape(4.dp)) {
+                                                        Text("Linked", fontSize = 9.sp, color = Color(0xFF8B5CF6), fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp))
+                                                    }
+                                                } else if (matched) {
                                                     Surface(color = Color(0xFF10B981).copy(alpha = 0.2f), shape = RoundedCornerShape(4.dp)) {
-                                                        Text("Linked", fontSize = 9.sp, color = Color(0xFF10B981), fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp))
+                                                        Text("Auto", fontSize = 9.sp, color = Color(0xFF10B981), fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp))
                                                     }
                                                 }
                                             }
@@ -244,12 +258,67 @@ fun CoolifyDialog(
                                 } else {
                                     Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth()) {
                                         Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                            val appUid = app.optString("uuid")
+                                            val isThisLinked = (linkedUuid.isNotBlank() && appUid == linkedUuid) || app.optBoolean("linked", false)
                                             Column(Modifier.weight(1f)) {
                                                 Text(app.optString("name"), fontWeight = FontWeight.Bold, fontSize = 13.sp)
                                                 val fqdn = app.optString("fqdn", "")
                                                 if (fqdn.isNotBlank()) {
                                                     Text(fqdn, fontSize = 10.sp, color = MaterialTheme.colorScheme.primary, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                                 }
+                                                if (isThisLinked && selectedProject.isNotBlank()) {
+                                                    Text("Linked to $selectedProject · Agent knows this container", fontSize = 9.sp, color = Color(0xFF8B5CF6))
+                                                }
+                                            }
+                                            if (selectedProject.isNotBlank()) {
+                                                OutlinedButton(
+                                                    onClick = {
+                                                        linkingBusy = true
+                                                        actionBanner = ""
+                                                        scope.launch {
+                                                            if (isThisLinked) {
+                                                                runCatching { api.coolifyUnlink(selectedProject) }
+                                                                    .onSuccess {
+                                                                        linkedUuid = ""
+                                                                        actionBanner = "Unlinked Coolify container from $selectedProject"
+                                                                        loadOverview()
+                                                                    }
+                                                                    .onFailure { errorMsg = it.message ?: "Unlink failed" }
+                                                            } else {
+                                                                runCatching {
+                                                                    api.coolifyLink(
+                                                                        project = selectedProject,
+                                                                        appUuid = appUid,
+                                                                        appName = app.optString("name"),
+                                                                        fqdn = app.optString("fqdn"),
+                                                                        gitBranch = app.optString("git_branch"),
+                                                                        buildPack = app.optString("build_pack"),
+                                                                        status = app.optString("status")
+                                                                    )
+                                                                }
+                                                                    .onSuccess {
+                                                                        linkedUuid = appUid
+                                                                        actionBanner = "🔗 Linked ${app.optString("name")} to $selectedProject"
+                                                                        loadOverview()
+                                                                    }
+                                                                    .onFailure { errorMsg = it.message ?: "Link failed" }
+                                                            }
+                                                            linkingBusy = false
+                                                        }
+                                                    },
+                                                    enabled = !linkingBusy,
+                                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                                    modifier = Modifier.height(30.dp)
+                                                ) {
+                                                    Icon(
+                                                        if (isThisLinked) Icons.Default.LinkOff else Icons.Default.Link,
+                                                        contentDescription = null,
+                                                        modifier = Modifier.size(13.dp)
+                                                    )
+                                                    Spacer(Modifier.width(4.dp))
+                                                    Text(if (isThisLinked) "Unlink" else "Link", fontSize = 11.sp)
+                                                }
+                                                Spacer(Modifier.width(6.dp))
                                             }
                                             Button(
                                                 onClick = {

@@ -601,6 +601,16 @@ class LocalCore:
                 cmd_hint TEXT NOT NULL,
                 started_at REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS project_coolify_links(
+                project TEXT PRIMARY KEY,
+                app_uuid TEXT NOT NULL,
+                app_name TEXT NOT NULL DEFAULT '',
+                fqdn TEXT NOT NULL DEFAULT '',
+                git_branch TEXT NOT NULL DEFAULT '',
+                build_pack TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT '',
+                updated_at REAL NOT NULL
+            );
             ''')
 
     def _register_pid(self, key: str, proc: subprocess.Popen, cmd_hint: str):
@@ -1981,7 +1991,7 @@ class LocalCore:
                     except Exception:
                         pass
             memory_ctx = HermesMemoryLedger.build_context(project_path)
-            coolify_ctx = self.coolify_context_cache.get(project_name, '')
+            coolify_ctx = self._build_coolify_context_for_project(project_name)
             thread = self._thread_for_project(project_name, agent_name)
             effective_prompt = turn_prompt if (turn_prompt and turn_prompt.strip()) else rec['prompt']
             prompt_text = f'{policy}{instructions}{memory_ctx}{coolify_ctx}\n\nUser task:\n{effective_prompt}'
@@ -3499,6 +3509,9 @@ class LocalCore:
             except Exception:
                 pass
 
+        linked = self._get_coolify_link(project) if project else None
+        linked_uuid = linked['app_uuid'] if linked else ''
+
         apps: list[dict[str, Any]] = []
         if isinstance(apps_raw, list):
             for a in apps_raw:
@@ -3506,13 +3519,15 @@ class LocalCore:
                     continue
                 git_repo = str(a.get('git_repository') or '')
                 app_name = str(a.get('name') or '')
+                uid = str(a.get('uuid') or '')
+                is_linked = bool(linked_uuid and uid == linked_uuid)
                 matched = False
                 if origin_slug and origin_slug in git_repo.lower():
                     matched = True
                 elif proj_lower and (proj_lower == app_name.lower() or proj_lower in git_repo.lower()):
                     matched = True
-                apps.append({
-                    'uuid': str(a.get('uuid') or ''),
+                app_entry = {
+                    'uuid': uid,
                     'name': app_name,
                     'fqdn': str(a.get('fqdn') or ''),
                     'git_repository': git_repo,
@@ -3520,8 +3535,20 @@ class LocalCore:
                     'build_pack': str(a.get('build_pack') or ''),
                     'status': str(a.get('status') or ''),
                     'matched': matched,
-                })
-        apps.sort(key=lambda x: (not x['matched'], x['name'].lower()))
+                    'linked': is_linked,
+                }
+                apps.append(app_entry)
+                if is_linked and project:
+                    self.coolify_link(
+                        project,
+                        uid,
+                        app_name=app_entry['name'],
+                        fqdn=app_entry['fqdn'],
+                        git_branch=app_entry['git_branch'],
+                        build_pack=app_entry['build_pack'],
+                        status=app_entry['status'],
+                    )
+        apps.sort(key=lambda x: (not x['linked'], not x['matched'], x['name'].lower()))
 
         databases: list[dict[str, Any]] = []
         if isinstance(dbs_raw, list):
@@ -3536,20 +3563,90 @@ class LocalCore:
                 })
 
         if project:
-            matched_apps = [a for a in apps if a['matched']]
-            if matched_apps:
+            focus_apps = [a for a in apps if a['linked']] or [a for a in apps if a['matched']]
+            if focus_apps:
                 lines = ['\n\nCoolify Deployment Context (secret-free):']
-                for ma in matched_apps[:3]:
+                for ma in focus_apps[:3]:
+                    tag = '[LINKED] ' if ma.get('linked') else ''
                     lines.append(
-                        f"- App '{ma['name']}' (uuid={ma['uuid']}): status={ma['status']}, "
+                        f"- {tag}App '{ma['name']}' (uuid={ma['uuid']}): status={ma['status']}, "
                         f"url={ma['fqdn']}, branch={ma['git_branch']}, build_pack={ma['build_pack']}, repo={ma['git_repository']}"
                     )
                 if databases:
                     db_names = ', '.join(f"{d['name']} ({d['type']}: {d['status']})" for d in databases[:5])
                     lines.append(f"- Coolify Databases: {db_names}")
+                lines.append(
+                    "- Note: COOLIFY_API_TOKEN is stored securely in Android KeyStore (not in CLI env). "
+                    "If you need live Coolify deployment logs, ask the user to click Coolify -> 'Send Deploy Log to AI Agent'."
+                )
                 self.coolify_context_cache[project] = '\n'.join(lines)
 
-        return {'apps': apps, 'databases': databases, 'matched_count': sum(1 for a in apps if a['matched'])}
+        return {
+            'apps': apps,
+            'databases': databases,
+            'matched_count': sum(1 for a in apps if a['matched']),
+            'linked_uuid': linked_uuid,
+        }
+
+    def _get_coolify_link(self, project: str) -> dict[str, Any] | None:
+        if not project:
+            return None
+        with self._db() as db:
+            row = db.execute(
+                'SELECT project, app_uuid, app_name, fqdn, git_branch, build_pack, status, updated_at '
+                'FROM project_coolify_links WHERE project=?',
+                (project,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def _build_coolify_context_for_project(self, project: str) -> str:
+        cached = self.coolify_context_cache.get(project, '')
+        if cached:
+            return cached
+        linked = self._get_coolify_link(project)
+        if not linked:
+            return ''
+        return (
+            '\n\nCoolify Deployment Context (secret-free):\n'
+            f"- [LINKED] App '{linked['app_name'] or linked['app_uuid']}' (uuid={linked['app_uuid']}): "
+            f"status={linked['status']}, url={linked['fqdn']}, branch={linked['git_branch']}, build_pack={linked['build_pack']}\n"
+            "- Note: COOLIFY_API_TOKEN is stored securely in Android KeyStore (not in CLI env). "
+            "If you need live Coolify deployment logs, ask the user to click Coolify -> 'Send Deploy Log to AI Agent'."
+        )
+
+    def coolify_link(
+        self,
+        project: str,
+        app_uuid: str,
+        app_name: str = '',
+        fqdn: str = '',
+        git_branch: str = '',
+        build_pack: str = '',
+        status: str = '',
+    ) -> dict[str, Any]:
+        self._project(project)
+        uid = re.sub(r'[^a-zA-Z0-9_-]', '', (app_uuid or '').strip())
+        if not uid:
+            raise BridgeError('Application UUID is required', 400)
+        now = time.time()
+        with self._db() as db:
+            db.execute(
+                'INSERT INTO project_coolify_links(project, app_uuid, app_name, fqdn, git_branch, build_pack, status, updated_at) '
+                'VALUES(?,?,?,?,?,?,?,?) '
+                'ON CONFLICT(project) DO UPDATE SET '
+                'app_uuid=excluded.app_uuid, app_name=excluded.app_name, fqdn=excluded.fqdn, '
+                'git_branch=excluded.git_branch, build_pack=excluded.build_pack, status=excluded.status, updated_at=excluded.updated_at',
+                (project, uid, app_name[:160], fqdn[:300], git_branch[:120], build_pack[:80], status[:80], now),
+            )
+        self.coolify_context_cache.pop(project, None)
+        return {'linked': True, 'project': project, 'app_uuid': uid, 'app_name': app_name}
+
+    def coolify_unlink(self, project: str) -> dict[str, Any]:
+        self._project(project)
+        with self._db() as db:
+            db.execute('DELETE FROM project_coolify_links WHERE project=?', (project,))
+        self.coolify_context_cache.pop(project, None)
+        return {'linked': False, 'project': project}
 
     def coolify_deployments(self, url: str = '', token: str = '', app_uuid: str = '') -> dict[str, Any]:
         base_url = (url or '').strip() or os.environ.get('COOLIFY_URL', '').strip()

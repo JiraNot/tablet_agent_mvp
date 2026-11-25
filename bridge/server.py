@@ -234,6 +234,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200,self.core.coolify_deployment_logs(u, t, str(obj.get('deployment_uuid',''))))
             if seg[2]=='deploy':
                 return self.reply(200,self.core.coolify_deploy(u, t, str(obj.get('app_uuid',''))))
+            if seg[2]=='link':
+                return self.reply(200,self.core.coolify_link(
+                    str(obj.get('project','')),
+                    str(obj.get('app_uuid','')),
+                    app_name=str(obj.get('app_name','')),
+                    fqdn=str(obj.get('fqdn','')),
+                    git_branch=str(obj.get('git_branch','')),
+                    build_pack=str(obj.get('build_pack','')),
+                    status=str(obj.get('status','')),
+                ))
+            if seg[2]=='unlink':
+                return self.reply(200,self.core.coolify_unlink(str(obj.get('project',''))))
         raise BridgeError('Endpoint not found',404)
 
     def handle_one_request(self):

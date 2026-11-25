@@ -131,6 +131,34 @@ class CoolifyIntegrationTests(unittest.TestCase):
             self.core.coolify_deploy('https://coolify.example.com', 'tok', '')
         self.assertEqual(ctx2.exception.status, 400)
 
+    def test_coolify_link_and_unlink_persists_in_sqlite_and_worker_context(self):
+        proj = self.core.workspaces / 'controlaistudio'
+        proj.mkdir(parents=True)
+
+        res = self.core.coolify_link(
+            'controlaistudio',
+            'app-pinned-1',
+            app_name='studio-staging',
+            fqdn='https://staging.studio.example.com',
+            git_branch='develop',
+            build_pack='dockerfile',
+            status='running',
+        )
+        self.assertTrue(res['linked'])
+        self.assertEqual(res['app_uuid'], 'app-pinned-1')
+
+        # Even with empty RAM cache (e.g. after bridge restart), SQLite link builds agent context
+        self.core.coolify_context_cache.clear()
+        ctx = self.core._build_coolify_context_for_project('controlaistudio')
+        self.assertIn('[LINKED]', ctx)
+        self.assertIn('studio-staging', ctx)
+        self.assertIn('app-pinned-1', ctx)
+
+        # Unlink removes persisted link and context
+        ures = self.core.coolify_unlink('controlaistudio')
+        self.assertFalse(ures['linked'])
+        self.assertEqual(self.core._build_coolify_context_for_project('controlaistudio'), '')
+
 
 if __name__ == '__main__':
     unittest.main()
