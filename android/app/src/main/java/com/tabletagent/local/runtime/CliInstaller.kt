@@ -57,11 +57,14 @@ object CliInstaller {
 
     suspend fun installWebQaTools(context: Context): ExecutionResult = withContext(Dispatchers.IO) {
         val cmd = """
-            if command -v apk >/dev/null 2>&1; then
-                apk update && apk add --no-cache chromium nss freetype harfbuzz ca-certificates ttf-freefont
-            elif command -v apt-get >/dev/null 2>&1; then
-                apt-get update && apt-get install -y chromium
+            if ! command -v chromium-browser >/dev/null 2>&1 && ! command -v chromium >/dev/null 2>&1; then
+                if command -v apk >/dev/null 2>&1; then
+                    apk update && (apk add --no-cache chromium nss freetype harfbuzz ca-certificates ttf-freefont || true)
+                elif command -v apt-get >/dev/null 2>&1; then
+                    apt-get update && apt-get install -y chromium
+                fi
             fi && \
+            (command -v chromium-browser >/dev/null 2>&1 || command -v chromium >/dev/null 2>&1) && \
             PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install -g playwright --no-audit --no-fund --loglevel=error
         """.trimIndent()
         EmbeddedProcessRunner.execute(context, cmd, timeoutMs = 300_000L)
