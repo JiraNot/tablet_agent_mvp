@@ -1018,7 +1018,6 @@ fun TabletAgentApp() {
                 }
             }
         }
-    }
     if (oauthState.cliType.isNotBlank()) {
         CliOAuthDialog(
             state = oauthState,
@@ -1290,6 +1289,7 @@ fun TabletAgentApp() {
                 prompt = deployPrompt
             }
         )
+    }
     }
 }
 
