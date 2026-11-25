@@ -3204,36 +3204,29 @@ private fun ToolBatchAccordionCard(
         modifier = Modifier
             .fillMaxWidth()
             .padding(start = 34.dp)
-            .clip(RoundedCornerShape(10.dp))
-            .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.30f))
-            .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.25f), RoundedCornerShape(10.dp))
+            .clip(RoundedCornerShape(8.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.42f))
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.50f), RoundedCornerShape(8.dp))
             .clickable { expanded = !expanded }
-            .padding(horizontal = 10.dp, vertical = 7.dp)
+            .padding(horizontal = 8.dp, vertical = 4.dp)
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.fillMaxWidth()
         ) {
-            Box(
-                contentAlignment = Alignment.Center,
-                modifier = Modifier
-                    .size(20.dp)
-                    .clip(RoundedCornerShape(5.dp))
-                    .background(MaterialTheme.colorScheme.primary)
-            ) {
-                Icon(
-                    if (batch.isToolBatch) Icons.Default.Build else Icons.Default.Terminal,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onPrimary,
-                    modifier = Modifier.size(11.dp)
-                )
-            }
-            Spacer(Modifier.width(8.dp))
+            Icon(
+                if (batch.isToolBatch) Icons.Default.Build else Icons.Default.Terminal,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                modifier = Modifier.size(12.dp)
+            )
+            Spacer(Modifier.width(6.dp))
             Text(
                 batch.summaryTitle,
-                style = MaterialTheme.typography.labelLarge,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurface,
+                style = MaterialTheme.typography.labelSmall,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Normal,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f)
@@ -3241,35 +3234,30 @@ private fun ToolBatchAccordionCard(
             Spacer(Modifier.width(6.dp))
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(50))
-                    .background(
-                        if (isBusy) MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
-                        else MaterialTheme.colorScheme.tertiary.copy(alpha = 0.14f)
-                    )
-                    .padding(horizontal = 7.dp, vertical = 2.dp)
+                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
             ) {
                 Icon(
-                    if (isBusy) Icons.Default.Sync else Icons.Default.CheckCircle,
+                    if (isBusy) Icons.Default.Sync else Icons.Default.Check,
                     contentDescription = null,
-                    tint = if (isBusy) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.tertiary,
-                    modifier = Modifier.size(11.dp)
+                    tint = if (isBusy) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                    modifier = Modifier.size(10.dp)
                 )
-                Spacer(Modifier.width(4.dp))
+                Spacer(Modifier.width(3.dp))
                 Text(
                     statusLabel,
                     style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    color = if (isBusy) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.tertiary,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Normal,
+                    color = if (isBusy) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
                     maxLines = 1
                 )
             }
-            Spacer(Modifier.width(4.dp))
+            Spacer(Modifier.width(2.dp))
             Icon(
                 if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
                 contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(17.dp)
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                modifier = Modifier.size(14.dp)
             )
         }
 
