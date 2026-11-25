@@ -107,8 +107,8 @@ class LocalApi(private val deviceToken: String, port: Int = 8765) {
         request("POST", "/v1/projects/${encode(project)}/git/checkout", JSONObject().put("branch", branch).put("create", create))
     suspend fun gitPush(project: String, remote: String = "origin", branch: String = "", token: String = ""): JSONObject =
         request("POST", "/v1/projects/${encode(project)}/git/push", JSONObject().put("remote", remote).put("branch", branch).put("token", token))
-    suspend fun gitCreateAndPush(project: String, repoName: String = "", isPrivate: Boolean = true, description: String = "", token: String = ""): JSONObject =
-        request("POST", "/v1/projects/${encode(project)}/git/create-and-push", JSONObject().put("repo_name", repoName).put("private", isPrivate).put("description", description).put("token", token))
+    suspend fun gitCreateAndPush(project: String, repoName: String = "", isPrivate: Boolean = true, description: String = "", token: String = "", userName: String = "", userEmail: String = ""): JSONObject =
+        request("POST", "/v1/projects/${encode(project)}/git/create-and-push", JSONObject().put("repo_name", repoName).put("private", isPrivate).put("description", description).put("token", token).put("user_name", userName).put("user_email", userEmail))
     suspend fun gitPull(project: String, remote: String = "origin", branch: String = "", token: String = ""): JSONObject =
         request("POST", "/v1/projects/${encode(project)}/git/pull", JSONObject().put("remote", remote).put("branch", branch).put("token", token))
     suspend fun gitLog(project: String, limit: Int = 50): JSONObject =

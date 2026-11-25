@@ -733,6 +733,32 @@ class LocalCore:
             '-c', f'http.https://github.com/.extraheader=AUTHORIZATION: basic {basic}',
         ]
 
+    @staticmethod
+    def _resolve_git_identity(git_cmd: str, base: Path, user_name: str = '', user_email: str = '') -> tuple[str, str]:
+        gh_user = (user_name or '').strip() or os.environ.get('GITHUB_USER', '').strip()
+        gh_email = (user_email or '').strip() or os.environ.get('GITHUB_EMAIL', '').strip()
+        if not gh_user:
+            chk_u = subprocess.run([git_cmd, 'config', 'user.name'], cwd=base, capture_output=True, text=True, timeout=5)
+            gh_user = chk_u.stdout.strip() if chk_u.returncode == 0 and chk_u.stdout.strip() else 'Tablet Developer'
+        if not gh_email:
+            chk_e = subprocess.run([git_cmd, 'config', 'user.email'], cwd=base, capture_output=True, text=True, timeout=5)
+            gh_email = chk_e.stdout.strip() if chk_e.returncode == 0 and chk_e.stdout.strip() else 'agent@tablet.local'
+        return gh_user, gh_email
+
+    @staticmethod
+    def _github_https_remote_target(git_cmd: str, base: Path, rem: str, gh_token: str) -> str:
+        if not gh_token:
+            return rem
+        url_res = subprocess.run([git_cmd, 'remote', 'get-url', rem], cwd=base, capture_output=True, text=True, timeout=5)
+        rem_url = url_res.stdout.strip() if url_res.returncode == 0 else ''
+        if rem_url.startswith('git@github.com:'):
+            return 'https://github.com/' + rem_url[len('git@github.com:'):]
+        # Strip any embedded userinfo (e.g. https://user@github.com/...) so extraheader doesn't conflict
+        m = re.match(r'^https://[^/@]+@github\.com/(.+)$', rem_url)
+        if m:
+            return f'https://github.com/{m.group(1)}'
+        return rem
+
     def create_project(self, name: str, git_url: str = '', token: str = '') -> dict[str, Any]:
         if not NAME_RE.fullmatch(name) or name in {'.', '..'}:
             raise BridgeError('Invalid project name')
@@ -2325,22 +2351,8 @@ class LocalCore:
             res_add = subprocess.run([git_cmd, 'add', '-A'], cwd=base, capture_output=True, text=True, timeout=15)
             if res_add.returncode != 0:
                 raise BridgeError(f'Git add failed: {res_add.stderr.strip()}')
-            commit_cmd = [git_cmd]
-            gh_user = (user_name or '').strip() or os.environ.get('GITHUB_USER', '').strip()
-            gh_email = (user_email or '').strip() or os.environ.get('GITHUB_EMAIL', '').strip()
-            if not gh_user:
-                chk_u = subprocess.run([git_cmd, 'config', 'user.name'], cwd=base, capture_output=True, text=True, timeout=5)
-                if chk_u.returncode != 0 or not chk_u.stdout.strip():
-                    gh_user = 'Tablet Developer'
-            if not gh_email:
-                chk_e = subprocess.run([git_cmd, 'config', 'user.email'], cwd=base, capture_output=True, text=True, timeout=5)
-                if chk_e.returncode != 0 or not chk_e.stdout.strip():
-                    gh_email = 'agent@tablet.local'
-            if gh_user:
-                commit_cmd += ['-c', f'user.name={gh_user}']
-            if gh_email:
-                commit_cmd += ['-c', f'user.email={gh_email}']
-            commit_cmd += ['commit', '-m', msg]
+            gh_user, gh_email = self._resolve_git_identity(git_cmd, base, user_name, user_email)
+            commit_cmd = [git_cmd, '-c', f'user.name={gh_user}', '-c', f'user.email={gh_email}', 'commit', '-m', msg]
             res_commit = subprocess.run(commit_cmd, cwd=base, capture_output=True, text=True, timeout=15)
             if res_commit.returncode != 0:
                 if 'nothing to commit' in res_commit.stdout or 'nothing to commit' in res_commit.stderr:
@@ -2421,13 +2433,7 @@ class LocalCore:
         push_env['GIT_TERMINAL_PROMPT'] = '0'
         if gh_token:
             push_cmd += self._github_auth_git_args(gh_token)
-        # If remote is git@github.com:... and we have an HTTPS token, push via HTTPS URL instead of SSH
-        push_target = rem
-        if gh_token:
-            url_res = subprocess.run([git_cmd, 'remote', 'get-url', rem], cwd=base, capture_output=True, text=True, timeout=5)
-            rem_url = url_res.stdout.strip() if url_res.returncode == 0 else ''
-            if rem_url.startswith('git@github.com:'):
-                push_target = 'https://github.com/' + rem_url[len('git@github.com:'):]
+        push_target = self._github_https_remote_target(git_cmd, base, rem, gh_token)
         # Explicitly never pass --force or -f.
         push_cmd += ['push', '-u', push_target, target_branch]
         try:
@@ -2439,7 +2445,7 @@ class LocalCore:
             raise BridgeError(f'Git push failed: {combined[:350]}', 422)
         return {'success': True, 'remote': rem, 'branch': target_branch, 'output': combined[:1000]}
 
-    def git_create_and_push(self, project: str, repo_name: str = '', is_private: bool = True, description: str = '', token: str = '') -> dict[str, Any]:
+    def git_create_and_push(self, project: str, repo_name: str = '', is_private: bool = True, description: str = '', token: str = '', user_name: str = '', user_email: str = '') -> dict[str, Any]:
         base = self._project(project)
         git_cmd = shutil.which('git') or 'git'
         gh_token = (token or '').strip() or os.environ.get('GITHUB_TOKEN', '').strip()
@@ -2453,8 +2459,7 @@ class LocalCore:
             if not gi.exists():
                 gi.write_text('node_modules/\ndist/\n.next/\n.venv/\n__pycache__/\n.gradle/\n.env\n.env.*\n!.env.example\n', encoding='utf-8')
 
-        gh_user = os.environ.get('GITHUB_USER', '').strip()
-        gh_email = os.environ.get('GITHUB_EMAIL', '').strip()
+        gh_user, gh_email = self._resolve_git_identity(git_cmd, base, user_name, user_email)
 
         # 2. Stage and commit files if no commits exist or working tree has changes
         rev_head = subprocess.run([git_cmd, 'rev-parse', 'HEAD'], cwd=base, capture_output=True, text=True, timeout=5)
@@ -2464,13 +2469,10 @@ class LocalCore:
 
         if not has_head or has_changes:
             subprocess.run([git_cmd, 'add', '-A'], cwd=base, capture_output=True, timeout=15)
-            commit_cmd = [git_cmd]
-            if gh_user:
-                commit_cmd += ['-c', f'user.name={gh_user}']
-            if gh_email:
-                commit_cmd += ['-c', f'user.email={gh_email}']
-            commit_cmd += ['commit', '-m', f'Initial commit: {project}']
-            subprocess.run(commit_cmd, cwd=base, capture_output=True, timeout=15)
+            commit_cmd = [git_cmd, '-c', f'user.name={gh_user}', '-c', f'user.email={gh_email}', 'commit', '-m', f'Initial commit: {project}']
+            res_c = subprocess.run(commit_cmd, cwd=base, capture_output=True, text=True, timeout=15)
+            if res_c.returncode != 0 and not has_head:
+                raise BridgeError(f'Initial git commit failed: {(res_c.stderr or res_c.stdout).strip()[:250]}', 422)
 
         # 3. Ensure target branch is main or active branch
         cur_br = subprocess.run([git_cmd, 'rev-parse', '--abbrev-ref', 'HEAD'], cwd=base, capture_output=True, text=True, timeout=5)
@@ -2597,8 +2599,12 @@ class LocalCore:
         pull_env['GIT_TERMINAL_PROMPT'] = '0'
         if gh_token:
             pull_cmd += self._github_auth_git_args(gh_token)
-        pull_cmd += ['pull', rem, target_branch] if target_branch else ['pull', rem]
-        res = subprocess.run(pull_cmd, cwd=base, capture_output=True, text=True, timeout=60, env=pull_env)
+        pull_target = self._github_https_remote_target(git_cmd, base, rem, gh_token)
+        pull_cmd += ['pull', pull_target, target_branch] if target_branch else ['pull', pull_target]
+        try:
+            res = subprocess.run(pull_cmd, cwd=base, capture_output=True, text=True, timeout=75, env=pull_env)
+        except subprocess.TimeoutExpired:
+            raise BridgeError('Git pull timed out after 75 seconds. Check your internet connection.', 504)
         combined = REDACTION.sub('[REDACTED]', (res.stdout + '\n' + res.stderr).strip())
         if res.returncode != 0:
             unmerged = subprocess.run([git_cmd, 'diff', '--name-only', '--diff-filter=U'], cwd=base, capture_output=True, text=True, timeout=10)

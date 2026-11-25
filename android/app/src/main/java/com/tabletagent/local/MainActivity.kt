@@ -3672,7 +3672,8 @@ fun GitReviewDialog(
                             try {
                                 val ghToken = SecureSecrets.getKey(ctx, SecureSecrets.KEY_GITHUB)
                                 if (createNewRepoMode) {
-                                    val res = api.gitCreateAndPush(project, newRepoName, isPrivateRepo, newRepoDesc, ghToken)
+                                    val ghEmail = SecureSecrets.getKey(ctx, SecureSecrets.KEY_GITHUB_EMAIL)
+                                    val res = api.gitCreateAndPush(project, newRepoName, isPrivateRepo, newRepoDesc, ghToken, ghUser, ghEmail)
                                     showPushDialog = false
                                     refresh()
                                     HapticFeedbackHelper.vibrateSuccess(ctx)
@@ -3732,6 +3733,7 @@ fun GitReviewDialog(
 
     if (showPrDialog) {
         val ctx = LocalContext.current
+        var prError by remember(showPrDialog) { mutableStateOf("") }
         AlertDialog(
             onDismissRequest = { if (!creatingPr) showPrDialog = false },
             title = {
@@ -3774,12 +3776,28 @@ fun GitReviewDialog(
                         modifier = Modifier.fillMaxWidth().heightIn(min = 120.dp, max = 220.dp),
                         textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)
                     )
+
+                    if (prError.isNotBlank()) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.errorContainer,
+                            shape = RoundedCornerShape(6.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                prError,
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                fontSize = 11.sp,
+                                modifier = Modifier.padding(8.dp)
+                            )
+                        }
+                    }
                 }
             },
             confirmButton = {
                 Button(
                     onClick = {
                         creatingPr = true
+                        prError = ""
                         scope.launch {
                             try {
                                 val ghToken = SecureSecrets.getKey(ctx, SecureSecrets.KEY_GITHUB)
@@ -3790,6 +3808,9 @@ fun GitReviewDialog(
                                 showPrSuccessDialog = true
                             } catch (e: Exception) {
                                 HapticFeedbackHelper.vibrateError(ctx)
+                                val errMsg = e.message ?: "PR creation failed"
+                                prError = errMsg
+                                gitBanner = false to errMsg
                                 notify(e)
                             } finally {
                                 creatingPr = false
