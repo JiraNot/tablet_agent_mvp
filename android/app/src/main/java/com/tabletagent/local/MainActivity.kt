@@ -3542,6 +3542,7 @@ fun GitReviewDialog(
         val ctx = LocalContext.current
         val hasGh = SecureSecrets.hasKey(ctx, SecureSecrets.KEY_GITHUB)
         val ghUser = SecureSecrets.getKey(ctx, SecureSecrets.KEY_GITHUB_USER)
+        var pushError by remember(showPushDialog) { mutableStateOf("") }
 
         AlertDialog(
             onDismissRequest = { if (!pushing) showPushDialog = false },
@@ -3641,12 +3642,28 @@ fun GitReviewDialog(
                             Text("Create & Push to a New GitHub Repo instead", fontSize = 11.sp)
                         }
                     }
+
+                    if (pushError.isNotBlank()) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.errorContainer,
+                            shape = RoundedCornerShape(6.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                pushError,
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                fontSize = 11.sp,
+                                modifier = Modifier.padding(8.dp)
+                            )
+                        }
+                    }
                 }
             },
             confirmButton = {
                 Button(
                     onClick = {
                         pushing = true
+                        pushError = ""
                         scope.launch {
                             try {
                                 val ghToken = SecureSecrets.getKey(ctx, SecureSecrets.KEY_GITHUB)
@@ -3680,7 +3697,9 @@ fun GitReviewDialog(
                                 }
                             } catch (e: Exception) {
                                 HapticFeedbackHelper.vibrateError(ctx)
-                                gitBanner = false to (e.message ?: "Push failed")
+                                val errMsg = e.message ?: "Push failed"
+                                pushError = errMsg
+                                gitBanner = false to errMsg
                                 notify(e)
                             } finally {
                                 pushing = false

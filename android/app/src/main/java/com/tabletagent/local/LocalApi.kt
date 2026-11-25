@@ -22,6 +22,7 @@ class LocalApi(private val deviceToken: String, port: Int = 8765) {
                 conn.readTimeout = when {
                     path == "/v1/projects" && method == "POST" -> 180000
                     path.endsWith("/attachments") && method == "POST" -> 60000
+                    path.contains("/git/") && method == "POST" -> 90000
                     else -> 12000
                 }
                 conn.setRequestProperty("Authorization", "Bearer $deviceToken")

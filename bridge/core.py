@@ -2403,12 +2403,22 @@ class LocalCore:
             import base64
             basic = base64.b64encode(f'x-access-token:{gh_token}'.encode('utf-8')).decode('ascii')
             push_cmd += ['-c', f'http.https://github.com/.extraheader=AUTHORIZATION: basic {basic}']
+        # If remote is git@github.com:... and we have an HTTPS token, push via HTTPS URL instead of SSH
+        push_target = rem
+        if gh_token:
+            url_res = subprocess.run([git_cmd, 'remote', 'get-url', rem], cwd=base, capture_output=True, text=True, timeout=5)
+            rem_url = url_res.stdout.strip() if url_res.returncode == 0 else ''
+            if rem_url.startswith('git@github.com:'):
+                push_target = 'https://github.com/' + rem_url[len('git@github.com:'):]
         # Explicitly never pass --force or -f.
-        push_cmd += ['push', '-u', rem, target_branch]
-        res = subprocess.run(push_cmd, cwd=base, capture_output=True, text=True, timeout=60, env=push_env)
+        push_cmd += ['push', '-u', push_target, target_branch]
+        try:
+            res = subprocess.run(push_cmd, cwd=base, capture_output=True, text=True, timeout=75, env=push_env)
+        except subprocess.TimeoutExpired:
+            raise BridgeError('Git push timed out after 75 seconds. Check your internet connection.', 504)
         combined = REDACTION.sub('[REDACTED]', (res.stdout + '\n' + res.stderr).strip())
         if res.returncode != 0:
-            raise BridgeError(f'Git push failed: {combined[:300]}', 422)
+            raise BridgeError(f'Git push failed: {combined[:350]}', 422)
         return {'success': True, 'remote': rem, 'branch': target_branch, 'output': combined[:1000]}
 
     def git_create_and_push(self, project: str, repo_name: str = '', is_private: bool = True, description: str = '', token: str = '') -> dict[str, Any]:
