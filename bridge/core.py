@@ -1996,6 +1996,7 @@ class LocalCore:
             memory_ctx = HermesMemoryLedger.build_context(project_path)
             coolify_ctx = self._build_coolify_context_for_project(project_name)
             web_qa_ctx = self._build_web_qa_context()
+            os.environ['TABLET_PROJECT'] = project_name
             thread = self._thread_for_project(project_name, agent_name)
             effective_prompt = turn_prompt if (turn_prompt and turn_prompt.strip()) else rec['prompt']
             prompt_text = f'{policy}{instructions}{memory_ctx}{coolify_ctx}{web_qa_ctx}\n\nUser task:\n{effective_prompt}'
@@ -3660,7 +3661,8 @@ def main():
         return default
 
     if cmd == 'status':
-        path, body = '/v1/coolify/overview', {'project': opt('--project', '')}
+        proj = opt('--project', '') or os.environ.get('TABLET_PROJECT', '').strip() or Path.cwd().name
+        path, body = '/v1/coolify/overview', {'project': proj}
     elif cmd == 'deployments':
         uid = args[1] if len(args) > 1 and not args[1].startswith('-') else opt('--app', '')
         path, body = '/v1/coolify/deployments', {'app_uuid': uid}
@@ -3671,9 +3673,10 @@ def main():
         uid = args[1] if len(args) > 1 and not args[1].startswith('-') else opt('--app', '')
         path, body = '/v1/coolify/deploy', {'app_uuid': uid}
     elif cmd == 'create-staging':
+        proj = opt('--project', '') or os.environ.get('TABLET_PROJECT', '').strip() or Path.cwd().name
         path, body = '/v1/coolify/create-staging', {
-            'project': opt('--project', ''),
-            'branch': opt('--branch', 'staging'),
+            'project': proj,
+            'branch': opt('--branch', ''),
             'build_pack': opt('--build-pack', ''),
             'name': opt('--name', ''),
         }
@@ -3753,11 +3756,14 @@ if __name__ == '__main__':
         if cached:
             return cached
         cli_hint = (
-            "- Agent Coolify CLI (secret-free loopback proxy): `tablet-coolify` is on PATH. "
-            "Use `tablet-coolify status --project <name>`, `tablet-coolify deployments <app_uuid>`, "
-            "`tablet-coolify logs <deployment_uuid>`, `tablet-coolify deploy <app_uuid>`, "
-            "or `tablet-coolify create-staging --project <name> --branch staging` to test Docker builds on Coolify "
-            "(COOLIFY_API_TOKEN is kept in bridge RAM/KeyStore and never exposed to CLI env)."
+            f"- Agent Coolify CLI (`tablet-coolify` on PATH, auto-uses current project '{project}'): "
+            "Users do NOT need to type CLI commands. When the user asks in plain language to check Coolify, inspect build logs, "
+            "test Docker build/deploy, or create a staging environment, run:\n"
+            "  * `tablet-coolify status` (list linked/matched Coolify apps)\n"
+            "  * `tablet-coolify deployments <app_uuid>` & `tablet-coolify logs <deployment_uuid>` (inspect Docker build logs)\n"
+            "  * `tablet-coolify create-staging` (auto-create & link a Coolify staging app from this repo)\n"
+            "  * `tablet-coolify deploy <app_uuid>` (trigger redeploy)\n"
+            "  (COOLIFY_API_TOKEN stays in bridge RAM/KeyStore and is never exposed to CLI env.)"
         )
         linked = self._get_coolify_link(project)
         if linked:
