@@ -1992,9 +1992,10 @@ class LocalCore:
                         pass
             memory_ctx = HermesMemoryLedger.build_context(project_path)
             coolify_ctx = self._build_coolify_context_for_project(project_name)
+            web_qa_ctx = self._build_web_qa_context()
             thread = self._thread_for_project(project_name, agent_name)
             effective_prompt = turn_prompt if (turn_prompt and turn_prompt.strip()) else rec['prompt']
-            prompt_text = f'{policy}{instructions}{memory_ctx}{coolify_ctx}\n\nUser task:\n{effective_prompt}'
+            prompt_text = f'{policy}{instructions}{memory_ctx}{coolify_ctx}{web_qa_ctx}\n\nUser task:\n{effective_prompt}'
             settings = self.get_settings()
             sandbox_override = 'danger-full-access' if (agent_name == 'codex' and mode == 'build' and settings.get('codex_proot_sandbox_bypass')) else None
             use_app_server = bool(agent_name == 'codex' and isinstance(adapter, CodexAdapter) and settings.get('codex_use_app_server'))
@@ -3587,6 +3588,20 @@ class LocalCore:
             'matched_count': sum(1 for a in apps if a['matched']),
             'linked_uuid': linked_uuid,
         }
+
+    @staticmethod
+    def _build_web_qa_context() -> str:
+        chromium_bin = shutil.which('chromium-browser') or shutil.which('chromium')
+        if not chromium_bin:
+            return ''
+        os.environ.setdefault('PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD', '1')
+        os.environ.setdefault('PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH', chromium_bin)
+        return (
+            '\n\nWeb QA / Browser Testing Environment:\n'
+            f"- System Chromium (ARM64) is available at '{chromium_bin}'. "
+            "When running Playwright/Puppeteer in PRoot, pass executablePath and launch args: "
+            "['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu']."
+        )
 
     def _get_coolify_link(self, project: str) -> dict[str, Any] | None:
         if not project:

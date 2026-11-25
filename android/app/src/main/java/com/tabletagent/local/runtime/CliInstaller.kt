@@ -10,7 +10,9 @@ data class CliVersions(
     val python: String? = null,
     val codex: String? = null,
     val agy: String? = null,
-    val claude: String? = null
+    val claude: String? = null,
+    val chromium: String? = null,
+    val playwright: String? = null
 )
 
 object CliInstaller {
@@ -26,6 +28,8 @@ object CliInstaller {
         val codexRes = EmbeddedProcessRunner.execute(context, "codex --version")
         val agyRes = EmbeddedProcessRunner.execute(context, "agy --version")
         val claudeRes = EmbeddedProcessRunner.execute(context, "claude --version")
+        val chromiumRes = EmbeddedProcessRunner.execute(context, "chromium-browser --version 2>/dev/null || chromium --version 2>/dev/null")
+        val pwRes = EmbeddedProcessRunner.execute(context, "playwright --version 2>/dev/null || node -e \"try{console.log(require('playwright/package.json').version)}catch{process.exit(1)}\"")
 
         CliVersions(
             node = if (nodeRes.exitCode == 0) nodeRes.stdout.trim() else null,
@@ -33,7 +37,9 @@ object CliInstaller {
             python = if (pyRes.exitCode == 0) pyRes.stdout.trim() else null,
             codex = if (codexRes.exitCode == 0) codexRes.stdout.trim() else null,
             agy = if (agyRes.exitCode == 0) agyRes.stdout.trim() else null,
-            claude = if (claudeRes.exitCode == 0) claudeRes.stdout.trim() else null
+            claude = if (claudeRes.exitCode == 0) claudeRes.stdout.trim() else null,
+            chromium = if (chromiumRes.exitCode == 0 && chromiumRes.stdout.isNotBlank()) chromiumRes.stdout.trim() else null,
+            playwright = if (pwRes.exitCode == 0 && pwRes.stdout.isNotBlank()) pwRes.stdout.trim() else null
         )
     }
 
@@ -47,5 +53,17 @@ object CliInstaller {
 
     suspend fun installClaude(context: Context): ExecutionResult = withContext(Dispatchers.IO) {
         EmbeddedProcessRunner.execute(context, "curl -fsSL https://claude.ai/install.sh | bash", timeoutMs = 180_000L)
+    }
+
+    suspend fun installWebQaTools(context: Context): ExecutionResult = withContext(Dispatchers.IO) {
+        val cmd = """
+            if command -v apk >/dev/null 2>&1; then
+                apk update && apk add --no-cache chromium nss freetype harfbuzz ca-certificates ttf-freefont
+            elif command -v apt-get >/dev/null 2>&1; then
+                apt-get update && apt-get install -y chromium
+            fi && \
+            PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install -g playwright
+        """.trimIndent()
+        EmbeddedProcessRunner.execute(context, cmd, timeoutMs = 300_000L)
     }
 }

@@ -965,6 +965,7 @@ fun TabletAgentApp() {
                                     "Codex" -> CliInstaller.installCodex(context)
                                     "AGY" -> CliInstaller.installAgy(context)
                                     "Claude" -> CliInstaller.installClaude(context)
+                                    "WebQA" -> CliInstaller.installWebQaTools(context)
                                     else -> ExecutionResult(-1, "", "Unknown CLI")
                                 }
                                 notify(Throwable(if (res.exitCode == 0) "$type CLI installed successfully!" else "Failed: ${res.stderr}"))
@@ -2559,6 +2560,56 @@ private fun SettingsScreen(
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
+                        }
+                    }
+                }
+
+                // Web QA Tools (Chromium ARM64 + Playwright)
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(12.dp)
+                    ) {
+                        Icon(Icons.Default.BugReport, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                        Spacer(Modifier.width(10.dp))
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(
+                                "Web QA Tools (Chromium ARM64 + Playwright)",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold
+                            )
+                            val crText = cliVersions?.chromium ?: "Not installed"
+                            val pwText = cliVersions?.playwright?.let { "Playwright $it" } ?: "Playwright not installed"
+                            Text(
+                                "Chromium: $crText · $pwText",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                "Installs Alpine Chromium ARM64 + Playwright (--no-sandbox) so agents can run real browser E2E checks locally.",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        val isWebQaReady = cliVersions?.chromium != null && cliVersions.playwright != null
+                        FilledTonalButton(
+                            enabled = installingCli == null && BootstrapManager.isReady(context),
+                            onClick = { onInstallCli("WebQA") },
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                            modifier = Modifier.height(32.dp)
+                        ) {
+                            if (installingCli == "WebQA") {
+                                CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                                Spacer(Modifier.width(6.dp))
+                                Text("Installing…", style = MaterialTheme.typography.labelSmall)
+                            } else {
+                                Text(if (isWebQaReady) "Reinstall" else "Install Web QA", style = MaterialTheme.typography.labelSmall)
+                            }
                         }
                     }
                 }
