@@ -198,4 +198,24 @@ class LocalApi(private val deviceToken: String, port: Int = 8765) {
     )
     suspend fun coolifyUnlink(project: String): JSONObject =
         request("POST", "/v1/coolify/unlink", JSONObject().put("project", project))
+    suspend fun coolifySync(url: String, token: String): JSONObject =
+        request("POST", "/v1/coolify/sync", JSONObject().put("url", url).put("token", token))
+    suspend fun coolifyCreateStaging(
+        project: String,
+        url: String = "",
+        token: String = "",
+        branch: String = "staging",
+        buildPack: String = "",
+        name: String = ""
+    ): JSONObject = request(
+        "POST",
+        "/v1/coolify/create-staging",
+        JSONObject()
+            .put("project", project)
+            .put("url", url)
+            .put("token", token)
+            .put("branch", branch)
+            .put("build_pack", buildPack)
+            .put("name", name)
+    )
 }

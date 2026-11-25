@@ -538,6 +538,15 @@ fun TabletAgentApp() {
                 .onFailure { notify(it) }
         }
     }
+    LaunchedEffect(online, token, bridgePort, keySummary.coolifyConfigured) {
+        if (online && token.isNotBlank() && keySummary.coolifyConfigured) {
+            val cUrl = SecureSecrets.getKey(context, SecureSecrets.KEY_COOLIFY_URL)
+            val cTok = SecureSecrets.getKey(context, SecureSecrets.KEY_COOLIFY_TOKEN)
+            if (cUrl.isNotBlank() && cTok.isNotBlank()) {
+                runCatching { api.coolifySync(cUrl, cTok) }
+            }
+        }
+    }
 
     MaterialTheme(colorScheme = if (darkTheme) aionClaudeDarkScheme() else aionClaudeLightScheme()) {
         val view = androidx.compose.ui.platform.LocalView.current

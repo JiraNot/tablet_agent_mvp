@@ -58,6 +58,8 @@ fun CoolifyDialog(
     var redeploying by remember { mutableStateOf(false) }
     var linkingBusy by remember { mutableStateOf(false) }
     var linkedUuid by remember { mutableStateOf("") }
+    var showCreateStaging by remember { mutableStateOf(false) }
+    var creatingStaging by remember { mutableStateOf(false) }
     var actionBanner by remember { mutableStateOf("") }
 
     fun loadOverview() {
@@ -144,6 +146,19 @@ fun CoolifyDialog(
                         if (coolifyUrl.isNotBlank()) {
                             Text(coolifyUrl, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
+                    }
+                    if (isConfigured && selectedProject.isNotBlank()) {
+                        OutlinedButton(
+                            onClick = { showCreateStaging = true },
+                            enabled = !creatingStaging,
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            modifier = Modifier.height(30.dp)
+                        ) {
+                            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(14.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Create Staging", fontSize = 11.sp)
+                        }
+                        Spacer(Modifier.width(6.dp))
                     }
                     if (isConfigured) {
                         IconButton(onClick = { loadOverview() }, modifier = Modifier.size(32.dp)) {
@@ -445,5 +460,80 @@ fun CoolifyDialog(
                 }
             }
         }
+    }
+    if (showCreateStaging && selectedProject.isNotBlank()) {
+        var stBranch by remember { mutableStateOf("staging") }
+        var stPack by remember { mutableStateOf("") }
+        var stName by remember { mutableStateOf("${selectedProject}-staging") }
+        AlertDialog(
+            onDismissRequest = { if (!creatingStaging) showCreateStaging = false },
+            title = { Text("Create Coolify Staging App") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        "Creates a new Coolify staging application from '$selectedProject' Git origin, triggers an initial Docker/Nixpacks deploy, and links it to this project.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    OutlinedTextField(
+                        value = stName,
+                        onValueChange = { stName = it },
+                        label = { Text("App Name") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = stBranch,
+                        onValueChange = { stBranch = it },
+                        label = { Text("Git Branch (e.g. staging or main)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf("" to "Auto", "dockerfile" to "Dockerfile", "nixpacks" to "Nixpacks").forEach { (pk, label) ->
+                            FilterChip(
+                                selected = stPack == pk,
+                                onClick = { stPack = pk },
+                                label = { Text(label, fontSize = 11.sp) }
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = !creatingStaging && stBranch.isNotBlank(),
+                    onClick = {
+                        creatingStaging = true
+                        errorMsg = ""
+                        scope.launch {
+                            runCatching {
+                                api.coolifyCreateStaging(
+                                    project = selectedProject,
+                                    url = coolifyUrl,
+                                    token = coolifyToken,
+                                    branch = stBranch.trim(),
+                                    buildPack = stPack,
+                                    name = stName.trim()
+                                )
+                            }
+                                .onSuccess { res ->
+                                    showCreateStaging = false
+                                    actionBanner = "🚀 Created & linked staging app '${res.optString("name", stName)}'"
+                                    selectedApp = null
+                                    loadOverview()
+                                }
+                                .onFailure { errorMsg = it.message ?: "Failed to create staging app" }
+                            creatingStaging = false
+                        }
+                    }
+                ) {
+                    Text(if (creatingStaging) "Creating…" else "Create & Deploy")
+                }
+            },
+            dismissButton = {
+                TextButton(enabled = !creatingStaging, onClick = { showCreateStaging = false }) { Text("Cancel") }
+            }
+        )
     }
 }

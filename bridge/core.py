@@ -529,6 +529,9 @@ class LocalCore:
         self.active_worktrees: dict[str, Path] = {}
         self.live_streams: dict[str, dict[str, Any]] = {}
         self.coolify_context_cache: dict[str, str] = {}
+        self._coolify_runtime_url: str = ''
+        self._coolify_runtime_token: str = ''
+        self._ensure_coolify_cli()
         self.adapters: dict[str, BaseAgentAdapter] = {
             'codex': CodexAdapter(),
             'claude': ClaudeCodeAdapter(),
@@ -3448,24 +3451,41 @@ class LocalCore:
             raise BridgeError('Invalid Coolify URL', 400)
         return f'{u.scheme}://{u.netloc}'
 
-    def _coolify_request(self, base_url: str, token: str, path: str, method: str = 'GET') -> Any:
+    def _coolify_request(
+        self,
+        base_url: str,
+        token: str,
+        path: str,
+        method: str = 'GET',
+        json_body: dict[str, Any] | None = None,
+    ) -> Any:
         import urllib.request
         import urllib.error
-        clean_url = self._coolify_base_url(base_url)
-        tok = (token or '').strip() or os.environ.get('COOLIFY_API_TOKEN', '').strip()
+        raw_url = (base_url or '').strip() or self._coolify_runtime_url or os.environ.get('COOLIFY_URL', '').strip()
+        clean_url = self._coolify_base_url(raw_url)
+        tok = (token or '').strip() or self._coolify_runtime_token or os.environ.get('COOLIFY_API_TOKEN', '').strip()
         if not tok:
             raise BridgeError('Coolify API token is required. Configure it in Settings.', 401)
+        if base_url and token:
+            self._coolify_runtime_url = clean_url
+            self._coolify_runtime_token = tok
+        headers = {
+            'Authorization': f'Bearer {tok}',
+            'Accept': 'application/json',
+            'User-Agent': 'TabletAgentStudio/0.1',
+        }
+        data_bytes = None
+        if json_body is not None:
+            data_bytes = json.dumps(json_body).encode('utf-8')
+            headers['Content-Type'] = 'application/json'
         req = urllib.request.Request(
             f'{clean_url}/api/v1{path}',
-            headers={
-                'Authorization': f'Bearer {tok}',
-                'Accept': 'application/json',
-                'User-Agent': 'TabletAgentStudio/0.1',
-            },
+            data=data_bytes,
+            headers=headers,
             method=method
         )
         try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with urllib.request.urlopen(req, timeout=20) as resp:
                 raw = resp.read().decode('utf-8', errors='replace')
                 if not raw.strip():
                     return {}
@@ -3480,8 +3500,20 @@ class LocalCore:
         except Exception as e:
             raise BridgeError(f'Coolify connection failed: {e}', 502)
 
+    def coolify_sync_runtime(self, url: str = '', token: str = '') -> dict[str, Any]:
+        u = (url or '').strip()
+        t = (token or '').strip()
+        if not u or not t:
+            self._coolify_runtime_url = ''
+            self._coolify_runtime_token = ''
+            return {'configured': False}
+        clean_url = self._coolify_base_url(u)
+        self._coolify_runtime_url = clean_url
+        self._coolify_runtime_token = t
+        return {'configured': True, 'url': clean_url}
+
     def coolify_test(self, url: str = '', token: str = '') -> dict[str, Any]:
-        base_url = (url or '').strip() or os.environ.get('COOLIFY_URL', '').strip()
+        base_url = (url or '').strip() or self._coolify_runtime_url or os.environ.get('COOLIFY_URL', '').strip()
         res = self._coolify_request(base_url, token, '/version')
         version = res.get('raw', str(res)) if isinstance(res, dict) else str(res)
         return {'ok': True, 'version': version[:120], 'url': self._coolify_base_url(base_url)}
@@ -3577,8 +3609,11 @@ class LocalCore:
                     db_names = ', '.join(f"{d['name']} ({d['type']}: {d['status']})" for d in databases[:5])
                     lines.append(f"- Coolify Databases: {db_names}")
                 lines.append(
-                    "- Note: COOLIFY_API_TOKEN is stored securely in Android KeyStore (not in CLI env). "
-                    "If you need live Coolify deployment logs, ask the user to click Coolify -> 'Send Deploy Log to AI Agent'."
+                    "- Agent Coolify CLI (secret-free loopback proxy): `tablet-coolify` is on PATH. "
+                    "Use `tablet-coolify status --project <name>`, `tablet-coolify deployments <app_uuid>`, "
+                    "`tablet-coolify logs <deployment_uuid>`, `tablet-coolify deploy <app_uuid>`, "
+                    "or `tablet-coolify create-staging --project <name> --branch staging` to test Docker builds on Coolify "
+                    "(COOLIFY_API_TOKEN is kept in bridge RAM/KeyStore and never exposed to CLI env)."
                 )
                 self.coolify_context_cache[project] = '\n'.join(lines)
 
@@ -3588,6 +3623,95 @@ class LocalCore:
             'matched_count': sum(1 for a in apps if a['matched']),
             'linked_uuid': linked_uuid,
         }
+
+    def _ensure_coolify_cli(self):
+        try:
+            bin_dir = self.home / 'bin'
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            cli_path = bin_dir / 'tablet-coolify'
+            script = '''#!/usr/bin/env python3
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+def main():
+    args = sys.argv[1:]
+    if not args or args[0] in ('-h', '--help'):
+        print('Usage: tablet-coolify <status|deployments|logs|deploy|create-staging> [options]')
+        return 0
+    cmd = args[0]
+    port = os.environ.get('TABLET_BRIDGE_PORT', '8765').strip() or '8765'
+    tok_file = os.environ.get('TABLET_BRIDGE_TOKEN_FILE', '').strip()
+    token = ''
+    if tok_file and Path(tok_file).is_file():
+        token = Path(tok_file).read_text(encoding='utf-8').strip()
+    if not token:
+        print('Bridge token not found', file=sys.stderr)
+        return 1
+
+    def opt(flag, default=''):
+        if flag in args:
+            i = args.index(flag)
+            if i + 1 < len(args):
+                return args[i + 1]
+        return default
+
+    if cmd == 'status':
+        path, body = '/v1/coolify/overview', {'project': opt('--project', '')}
+    elif cmd == 'deployments':
+        uid = args[1] if len(args) > 1 and not args[1].startswith('-') else opt('--app', '')
+        path, body = '/v1/coolify/deployments', {'app_uuid': uid}
+    elif cmd == 'logs':
+        duid = args[1] if len(args) > 1 and not args[1].startswith('-') else opt('--deployment', '')
+        path, body = '/v1/coolify/deployment-logs', {'deployment_uuid': duid}
+    elif cmd == 'deploy':
+        uid = args[1] if len(args) > 1 and not args[1].startswith('-') else opt('--app', '')
+        path, body = '/v1/coolify/deploy', {'app_uuid': uid}
+    elif cmd == 'create-staging':
+        path, body = '/v1/coolify/create-staging', {
+            'project': opt('--project', ''),
+            'branch': opt('--branch', 'staging'),
+            'build_pack': opt('--build-pack', ''),
+            'name': opt('--name', ''),
+        }
+    else:
+        print(f'Unknown command: {cmd}', file=sys.stderr)
+        return 2
+
+    req = urllib.request.Request(
+        f'http://127.0.0.1:{port}{path}',
+        data=json.dumps(body).encode('utf-8'),
+        headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'},
+        method='POST',
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            print(resp.read().decode('utf-8', errors='replace'))
+            return 0
+    except urllib.error.HTTPError as e:
+        print(e.read().decode('utf-8', errors='replace'), file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(str(e), file=sys.stderr)
+        return 1
+
+if __name__ == '__main__':
+    sys.exit(main())
+'''
+            cli_path.write_text(script, encoding='utf-8')
+            try:
+                cli_path.chmod(0o755)
+            except Exception:
+                pass
+            os.environ['TABLET_BRIDGE_TOKEN_FILE'] = str(self.token_path)
+            cur_path = os.environ.get('PATH', '')
+            if str(bin_dir) not in cur_path.split(os.pathsep):
+                os.environ['PATH'] = f"{bin_dir}{os.pathsep}{cur_path}" if cur_path else str(bin_dir)
+        except Exception:
+            pass
 
     @staticmethod
     def _build_web_qa_context() -> str:
@@ -3618,16 +3742,29 @@ class LocalCore:
         cached = self.coolify_context_cache.get(project, '')
         if cached:
             return cached
-        linked = self._get_coolify_link(project)
-        if not linked:
-            return ''
-        return (
-            '\n\nCoolify Deployment Context (secret-free):\n'
-            f"- [LINKED] App '{linked['app_name'] or linked['app_uuid']}' (uuid={linked['app_uuid']}): "
-            f"status={linked['status']}, url={linked['fqdn']}, branch={linked['git_branch']}, build_pack={linked['build_pack']}\n"
-            "- Note: COOLIFY_API_TOKEN is stored securely in Android KeyStore (not in CLI env). "
-            "If you need live Coolify deployment logs, ask the user to click Coolify -> 'Send Deploy Log to AI Agent'."
+        cli_hint = (
+            "- Agent Coolify CLI (secret-free loopback proxy): `tablet-coolify` is on PATH. "
+            "Use `tablet-coolify status --project <name>`, `tablet-coolify deployments <app_uuid>`, "
+            "`tablet-coolify logs <deployment_uuid>`, `tablet-coolify deploy <app_uuid>`, "
+            "or `tablet-coolify create-staging --project <name> --branch staging` to test Docker builds on Coolify "
+            "(COOLIFY_API_TOKEN is kept in bridge RAM/KeyStore and never exposed to CLI env)."
         )
+        linked = self._get_coolify_link(project)
+        if linked:
+            return (
+                '\n\nCoolify Deployment Context (secret-free):\n'
+                f"- [LINKED] App '{linked['app_name'] or linked['app_uuid']}' (uuid={linked['app_uuid']}): "
+                f"status={linked['status']}, url={linked['fqdn']}, branch={linked['git_branch']}, build_pack={linked['build_pack']}\n"
+                f"{cli_hint}"
+            )
+        if self._coolify_runtime_url or os.environ.get('COOLIFY_URL', '').strip():
+            return (
+                '\n\nCoolify Deployment Context (secret-free):\n'
+                f"- Coolify is connected ({self._coolify_runtime_url or 'configured'}). "
+                "No app is linked to this project yet.\n"
+                f"{cli_hint}"
+            )
+        return ''
 
     def coolify_link(
         self,
@@ -3714,9 +3851,102 @@ class LocalCore:
         }
 
     def coolify_deploy(self, url: str = '', token: str = '', app_uuid: str = '') -> dict[str, Any]:
-        base_url = (url or '').strip() or os.environ.get('COOLIFY_URL', '').strip()
+        base_url = (url or '').strip() or self._coolify_runtime_url or os.environ.get('COOLIFY_URL', '').strip()
         uid = re.sub(r'[^a-zA-Z0-9_-]', '', (app_uuid or '').strip())
         if not uid:
             raise BridgeError('Application UUID is required', 400)
         res = self._coolify_request(base_url, token, f'/deploy?uuid={uid}&force=false', method='POST')
         return {'success': True, 'response': res}
+
+    def coolify_create_staging(
+        self,
+        project: str,
+        url: str = '',
+        token: str = '',
+        branch: str = 'staging',
+        build_pack: str = '',
+        name: str = '',
+    ) -> dict[str, Any]:
+        p_dir = self._project(project)
+        base_url = (url or '').strip() or self._coolify_runtime_url or os.environ.get('COOLIFY_URL', '').strip()
+        git_cmd = shutil.which('git') or 'git'
+        git_repo = ''
+        if (p_dir / '.git').exists():
+            r = subprocess.run([git_cmd, 'remote', 'get-url', 'origin'], cwd=p_dir, capture_output=True, text=True, timeout=5)
+            if r.returncode == 0:
+                raw_remote = r.stdout.strip()
+                m = re.search(r'github\.com[:/]([^/]+/[^/\s]+?)(?:\.git)?/?$', raw_remote)
+                if m:
+                    git_repo = f'https://github.com/{m.group(1)}'
+                elif raw_remote.startswith('https://') or raw_remote.startswith('http://'):
+                    git_repo = raw_remote
+        if not git_repo:
+            raise BridgeError("Project must have a Git 'origin' remote before creating a Coolify staging app", 400)
+
+        servers = self._coolify_request(base_url, token, '/servers')
+        server_uuid = ''
+        if isinstance(servers, list):
+            for s in servers:
+                if isinstance(s, dict) and s.get('uuid'):
+                    server_uuid = str(s['uuid'])
+                    break
+        if not server_uuid:
+            raise BridgeError('No Coolify server found', 404)
+
+        projects_raw = self._coolify_request(base_url, token, '/projects')
+        project_uuid = ''
+        env_name = 'production'
+        if isinstance(projects_raw, list) and projects_raw:
+            chosen = next((p for p in projects_raw if isinstance(p, dict) and str(p.get('name', '')).lower() == project.lower()), None)
+            if not chosen:
+                chosen = next((p for p in projects_raw if isinstance(p, dict) and p.get('uuid')), None)
+            if chosen:
+                project_uuid = str(chosen.get('uuid') or '')
+                envs = chosen.get('environments') or []
+                if isinstance(envs, list):
+                    for ev in envs:
+                        if isinstance(ev, dict) and str(ev.get('name', '')).lower() == 'staging':
+                            env_name = str(ev['name'])
+                            break
+        if not project_uuid:
+            created_proj = self._coolify_request(base_url, token, '/projects', method='POST', json_body={'name': project})
+            project_uuid = str(created_proj.get('uuid') or '') if isinstance(created_proj, dict) else ''
+        if not project_uuid:
+            raise BridgeError('Failed to resolve or create Coolify project', 502)
+
+        chosen_pack = (build_pack or '').strip() or ('dockerfile' if (p_dir / 'Dockerfile').is_file() else 'nixpacks')
+        chosen_branch = (branch or '').strip() or 'main'
+        app_name = (name or '').strip() or f'{project}-staging'
+        payload = {
+            'project_uuid': project_uuid,
+            'server_uuid': server_uuid,
+            'environment_name': env_name,
+            'git_repository': git_repo,
+            'git_branch': chosen_branch,
+            'build_pack': chosen_pack,
+            'ports_exposes': '3000',
+            'name': app_name,
+            'instant_deploy': True,
+        }
+        res = self._coolify_request(base_url, token, '/applications/public', method='POST', json_body=payload)
+        app_uuid = str(res.get('uuid') or '') if isinstance(res, dict) else ''
+        if not app_uuid:
+            raise BridgeError('Coolify did not return an application UUID', 502)
+        self.coolify_link(
+            project,
+            app_uuid,
+            app_name=app_name,
+            git_branch=chosen_branch,
+            build_pack=chosen_pack,
+            status='starting',
+        )
+        return {
+            'success': True,
+            'app_uuid': app_uuid,
+            'name': app_name,
+            'git_branch': chosen_branch,
+            'build_pack': chosen_pack,
+            'environment_name': env_name,
+            'project_uuid': project_uuid,
+            'server_uuid': server_uuid,
+        }

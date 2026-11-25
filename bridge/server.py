@@ -246,6 +246,17 @@ class Handler(BaseHTTPRequestHandler):
                 ))
             if seg[2]=='unlink':
                 return self.reply(200,self.core.coolify_unlink(str(obj.get('project',''))))
+            if seg[2]=='sync':
+                return self.reply(200,self.core.coolify_sync_runtime(u, t))
+            if seg[2]=='create-staging':
+                return self.reply(200,self.core.coolify_create_staging(
+                    str(obj.get('project','')),
+                    url=u,
+                    token=t,
+                    branch=str(obj.get('branch','staging')),
+                    build_pack=str(obj.get('build_pack','')),
+                    name=str(obj.get('name','')),
+                ))
         raise BridgeError('Endpoint not found',404)
 
     def handle_one_request(self):
@@ -268,6 +279,7 @@ def create_server(home:Path,port:int=8765):
     class BoundHandler(Handler):
         core=bridge
     server=ThreadingHTTPServer(('127.0.0.1',port),BoundHandler)
+    os.environ['TABLET_BRIDGE_PORT'] = str(server.server_address[1])
     server.daemon_threads=True
     return server,bridge
 

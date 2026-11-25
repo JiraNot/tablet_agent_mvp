@@ -159,6 +159,52 @@ class CoolifyIntegrationTests(unittest.TestCase):
         self.assertFalse(ures['linked'])
         self.assertEqual(self.core._build_coolify_context_for_project('controlaistudio'), '')
 
+    def test_coolify_sync_runtime_and_create_staging_and_cli(self):
+        proj = self.core.workspaces / 'controlaistudio'
+        proj.mkdir(parents=True)
+        (proj / 'Dockerfile').write_text('FROM node:22-alpine\n', encoding='utf-8')
+        subprocess.run(['git', 'init'], cwd=proj, check=True, capture_output=True)
+        subprocess.run(
+            ['git', 'remote', 'add', 'origin', 'https://github.com/acme/controlaistudio.git'],
+            cwd=proj,
+            check=True,
+            capture_output=True,
+        )
+
+        # RAM-only sync
+        sync_res = self.core.coolify_sync_runtime('https://manage.onetapweb.com', 'tok-ram-999')
+        self.assertTrue(sync_res['configured'])
+        self.assertEqual(self.core._coolify_runtime_url, 'https://manage.onetapweb.com')
+        self.assertEqual(self.core._coolify_runtime_token, 'tok-ram-999')
+
+        # tablet-coolify helper was created
+        cli_bin = self.core.home / 'bin' / 'tablet-coolify'
+        self.assertTrue(cli_bin.is_file())
+
+        def fake_req(base_url, token, path, method='GET', json_body=None):
+            if path == '/servers':
+                return [{'uuid': 'srv-1', 'name': 'main-vps'}]
+            if path == '/projects':
+                return [{'uuid': 'prj-1', 'name': 'controlaistudio', 'environments': [{'name': 'staging'}]}]
+            if path == '/applications/public' and method == 'POST':
+                self.assertEqual(json_body['build_pack'], 'dockerfile')
+                self.assertEqual(json_body['environment_name'], 'staging')
+                self.assertEqual(json_body['git_branch'], 'staging')
+                return {'uuid': 'app-stg-99'}
+            return {}
+
+        with mock.patch.object(self.core, '_coolify_request', side_effect=fake_req):
+            res = self.core.coolify_create_staging('controlaistudio', branch='staging')
+
+        self.assertTrue(res['success'])
+        self.assertEqual(res['app_uuid'], 'app-stg-99')
+        self.assertEqual(res['build_pack'], 'dockerfile')
+        linked = self.core._get_coolify_link('controlaistudio')
+        self.assertEqual(linked['app_uuid'], 'app-stg-99')
+        ctx = self.core._build_coolify_context_for_project('controlaistudio')
+        self.assertIn('tablet-coolify', ctx)
+        self.assertNotIn('tok-ram-999', ctx)
+
 
 if __name__ == '__main__':
     unittest.main()
