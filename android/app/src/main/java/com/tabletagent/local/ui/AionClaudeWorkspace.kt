@@ -296,6 +296,7 @@ fun AionClaudeSidebar(
     onSelectProject: (String) -> Unit,
     onNewProject: () -> Unit,
     onOpenTemplates: () -> Unit = {},
+    onDeleteProject: (String) -> Unit = {},
     tasks: List<JSONObject>,
     selectedTask: String,
     isNewChatMode: Boolean,
@@ -417,6 +418,8 @@ fun AionClaudeSidebar(
             }
             Spacer(Modifier.height(3.dp))
 
+            var pendingDeleteProject by remember { mutableStateOf<String?>(null) }
+
             Column(verticalArrangement = Arrangement.spacedBy(0.dp)) {
                 projects.take(10).forEach { proj ->
                     val name = proj.optString("name")
@@ -435,7 +438,7 @@ fun AionClaudeSidebar(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = bgMod
                             .clickable { onSelectProject(name) }
-                            .padding(horizontal = 8.dp, vertical = 3.dp)
+                            .padding(start = 8.dp, end = 4.dp, top = 3.dp, bottom = 3.dp)
                     ) {
                         Icon(
                             if (isSelected) Icons.Default.Folder else Icons.Default.FolderOpen,
@@ -453,8 +456,42 @@ fun AionClaudeSidebar(
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f)
                         )
+                        IconButton(
+                            onClick = { pendingDeleteProject = name },
+                            modifier = Modifier.size(22.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.DeleteOutline,
+                                contentDescription = "Delete $name",
+                                modifier = Modifier.size(13.dp),
+                                tint = MaterialTheme.colorScheme.error.copy(alpha = if (isSelected) 0.85f else 0.5f)
+                            )
+                        }
                     }
                 }
+            }
+
+            pendingDeleteProject?.let { targetProj ->
+                AlertDialog(
+                    onDismissRequest = { pendingDeleteProject = null },
+                    icon = { Icon(Icons.Default.DeleteOutline, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+                    title = { Text("Delete Project?") },
+                    text = { Text("Delete \"$targetProj\" and all its local workspace files? This action cannot be undone.") },
+                    confirmButton = {
+                        Button(
+                            onClick = {
+                                pendingDeleteProject = null
+                                onDeleteProject(targetProj)
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                        ) {
+                            Text("Delete")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { pendingDeleteProject = null }) { Text("Cancel") }
+                    }
+                )
             }
 
             Spacer(Modifier.height(10.dp))

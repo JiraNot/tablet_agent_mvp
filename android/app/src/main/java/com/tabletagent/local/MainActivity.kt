@@ -458,6 +458,26 @@ fun TabletAgentApp() {
                         },
                         onNewProject = { createDialog = true },
                         onOpenTemplates = { showTemplatesDialog = true },
+                        onDeleteProject = { name ->
+                            scope.launch {
+                                runCatching {
+                                    api.deleteProject(name)
+                                    val projArr = api.projects()
+                                    lastProjectsRaw = projArr.toString()
+                                    projects = projArr.objects()
+                                    if (selectedProject == name) {
+                                        selectedProject = projects.firstOrNull()?.optString("name") ?: ""
+                                        selectedTask = ""
+                                        events = emptyList()
+                                        liveStream = null
+                                        eventCursor = 0
+                                        fileDir = "."
+                                        fileName = ""
+                                    }
+                                    error = "Deleted project $name"
+                                }.onFailure { notify(it) }
+                            }
+                        },
                         tasks = tasks,
                         selectedTask = selectedTask,
                         isNewChatMode = isNewChatMode,
