@@ -138,7 +138,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply(200,self.core.git_diff(name))
                 if seg[4]=='commit' and method=='POST':
                     obj=self._body()
-                    return self.reply(200,self.core.git_commit(name,str(obj.get('message',''))))
+                    return self.reply(200,self.core.git_commit(name,str(obj.get('message','')),user_name=str(obj.get('user_name','')),user_email=str(obj.get('user_email',''))))
                 if seg[4]=='rollback' and method=='POST':
                     obj=self._body()
                     target_sha=obj.get('sha')

@@ -3417,7 +3417,9 @@ fun GitReviewDialog(
                             committing = true
                             scope.launch {
                                 try {
-                                    val cRes = api.gitCommit(project, commitMessage.trim())
+                                    val ghUser = SecureSecrets.getKey(dialogCtx, SecureSecrets.KEY_GITHUB_USER)
+                                    val ghEmail = SecureSecrets.getKey(dialogCtx, SecureSecrets.KEY_GITHUB_EMAIL)
+                                    val cRes = api.gitCommit(project, commitMessage.trim(), ghUser, ghEmail)
                                     val sha = cRes.optString("sha", "").take(7)
                                     HapticFeedbackHelper.vibrateSuccess(dialogCtx)
                                     gitBanner = true to if (sha.isNotBlank()) "✅ Committed ($sha): ${commitMessage.trim()}" else "✅ Committed changes successfully!"

@@ -2313,7 +2313,7 @@ class LocalCore:
         except Exception as e:
             return {'diff': '', 'has_changes': False, 'error': str(e)}
 
-    def git_commit(self, project: str, message: str) -> dict[str, Any]:
+    def git_commit(self, project: str, message: str, user_name: str = '', user_email: str = '') -> dict[str, Any]:
         base = self._project(project)
         msg = message.strip()
         if not msg:
@@ -2326,8 +2326,8 @@ class LocalCore:
             if res_add.returncode != 0:
                 raise BridgeError(f'Git add failed: {res_add.stderr.strip()}')
             commit_cmd = [git_cmd]
-            gh_user = os.environ.get('GITHUB_USER', '').strip()
-            gh_email = os.environ.get('GITHUB_EMAIL', '').strip()
+            gh_user = (user_name or '').strip() or os.environ.get('GITHUB_USER', '').strip()
+            gh_email = (user_email or '').strip() or os.environ.get('GITHUB_EMAIL', '').strip()
             if not gh_user:
                 chk_u = subprocess.run([git_cmd, 'config', 'user.name'], cwd=base, capture_output=True, text=True, timeout=5)
                 if chk_u.returncode != 0 or not chk_u.stdout.strip():

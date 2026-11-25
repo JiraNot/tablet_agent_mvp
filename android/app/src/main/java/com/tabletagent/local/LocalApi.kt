@@ -79,7 +79,9 @@ class LocalApi(private val deviceToken: String, port: Int = 8765) {
             JSONObject().put("content", text).put("create_dirs", createDirs))
     suspend fun gitStatus(project: String): JSONObject = request("GET", "/v1/projects/${encode(project)}/git/status")
     suspend fun gitDiff(project: String): JSONObject = request("GET", "/v1/projects/${encode(project)}/git/diff")
-    suspend fun gitCommit(project: String, message: String): JSONObject = request("POST", "/v1/projects/${encode(project)}/git/commit", JSONObject().put("message", message))
+    suspend fun gitCommit(project: String, message: String, userName: String = "", userEmail: String = ""): JSONObject =
+        request("POST", "/v1/projects/${encode(project)}/git/commit",
+            JSONObject().put("message", message).put("user_name", userName).put("user_email", userEmail))
     suspend fun gitRollback(project: String, sha: String = "HEAD"): JSONObject = request("POST", "/v1/projects/${encode(project)}/git/rollback", JSONObject().put("sha", sha))
     suspend fun projectInstructions(project: String): JSONObject = request("GET", "/v1/projects/${encode(project)}/instructions")
     suspend fun saveProjectInstructions(project: String, content: String): JSONObject = request("PUT", "/v1/projects/${encode(project)}/instructions", JSONObject().put("content", content))

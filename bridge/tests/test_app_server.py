@@ -253,7 +253,9 @@ class CodexAppServerHarnessTests(unittest.TestCase):
     """M3 Adapter Test Harness covering start, stream, cancel, resume, error, approval, and reconnect."""
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        import sys
+        kwargs = {"ignore_cleanup_errors": True} if sys.version_info >= (3, 10) else {}
+        self.tmp = tempfile.TemporaryDirectory(**kwargs)
         self.root = Path(self.tmp.name)
         self.bin_dir = self.root / "bin"
         self.bin_dir.mkdir()

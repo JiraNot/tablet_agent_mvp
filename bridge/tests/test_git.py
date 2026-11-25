@@ -67,6 +67,14 @@ class GitTests(unittest.TestCase):
         res2 = self.core.git_commit('testgit', 'another commit')
         self.assertFalse(res2['committed'])
 
+        # Explicit logged-in GitHub identity overrides local git config
+        (self.proj_path / 'identity.txt').write_text('id test\n')
+        res3 = self.core.git_commit('testgit', 'chore: identity test', user_name='JiraNot', user_email='jiranot@example.com')
+        self.assertTrue(res3['committed'])
+        git = shutil.which('git')
+        author_res = subprocess.run([git, 'log', '-1', '--format=%an <%ae>'], cwd=self.proj_path, capture_output=True, text=True, check=True)
+        self.assertEqual(author_res.stdout.strip(), 'JiraNot <jiranot@example.com>')
+
     def test_git_http_endpoints(self):
         server, core = create_server(self.root / 'data_srv', port=0)
         port = server.server_address[1]
