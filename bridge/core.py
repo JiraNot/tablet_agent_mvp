@@ -527,6 +527,7 @@ class LocalCore:
         self.approval_events: dict[str, threading.Event] = {}
         self.task_queues: dict[str, list[dict[str, Any]]] = {}
         self.active_worktrees: dict[str, Path] = {}
+        self.live_streams: dict[str, dict[str, Any]] = {}
         self.adapters: dict[str, BaseAgentAdapter] = {
             'codex': CodexAdapter(),
             'claude': ClaudeCodeAdapter(),
@@ -880,7 +881,11 @@ class LocalCore:
         msg = REDACTION.sub('[REDACTED]', str(message))[:MAX_LOG_CHARS]
         with self._db() as db:
             db.execute('INSERT INTO events(task_id,timestamp,kind,message) VALUES(?,?,?,?)', (task, time.time(), kind, msg))
-            db.execute('DELETE FROM events WHERE task_id=? AND seq NOT IN (SELECT seq FROM events WHERE task_id=? ORDER BY seq DESC LIMIT ?)',(task,task,MAX_EVENTS_PER_TASK))
+            db.execute(
+                "DELETE FROM events WHERE task_id=? AND kind NOT IN ('user','message','thought','error') "
+                "AND seq NOT IN (SELECT seq FROM events WHERE task_id=? ORDER BY seq DESC LIMIT ?)",
+                (task, task, MAX_EVENTS_PER_TASK)
+            )
 
     def set_status(self, task: str, status: str, *, error: str | None = None, result: str | None = None, verification: str | None = None):
         cols = ['status=?', 'updated_at=?']; vals: list[Any] = [status, time.time()]
@@ -922,7 +927,9 @@ class LocalCore:
         items = rows[:120]
         min_seq = bounds['min_seq'] if bounds and bounds['min_seq'] is not None else 0
         gap_detected = bool(cursor > 0 and min_seq > 0 and min_seq > cursor + 1)
-        return {'events': items, 'has_more': has_more, 'gap_detected': gap_detected, 'min_seq': min_seq}
+        with self.lock:
+            live = self.live_streams.get(task_id)
+        return {'events': items, 'has_more': has_more, 'gap_detected': gap_detected, 'min_seq': min_seq, 'live_stream': live}
 
     def events(self, task_id: str, after_seq: int = 0) -> list[dict[str, Any]]:
         return self.events_page(task_id, after_seq)['events']
@@ -1420,8 +1427,14 @@ class LocalCore:
                                     self.append(task_id, 'thought', r_txt.strip()[:2000])
                             elif item.get('type') in {'command_execution','file_change'}:
                                 cmd_target = str(item.get('command', item.get('target', '')))
-                                detail = f' `{cmd_target[:100]}`' if cmd_target else ''
-                                self.append(task_id,'tool',f"{item.get('type')}{detail}: {item.get('status','')}")
+                                detail = f' `{cmd_target[:120]}`' if cmd_target else ''
+                                if kind == 'item.started':
+                                    with self.lock:
+                                        self.live_streams[task_id] = {'kind': 'status', 'text': f"Running {item.get('type')}{detail}..."}
+                                else:
+                                    with self.lock:
+                                        self.live_streams.pop(task_id, None)
+                                    self.append(task_id,'tool',f"{item.get('type')}{detail}: {item.get('status','')}")
                                 if self.is_destructive_command(cmd_target):
                                     if not self.request_approval(task_id, 'confirm_destructive', cmd_target):
                                         fail_marker = True
@@ -1661,12 +1674,18 @@ class LocalCore:
                     item_id = str(params.get('itemId', 'default'))
                     delta = str(params.get('delta', ''))
                     if delta:
-                        delta_buffers.setdefault(item_id, []).append(delta)
+                        buf = delta_buffers.setdefault(item_id, [])
+                        buf.append(delta)
+                        live_kind = 'thought' if 'reasoning' in method else 'message'
+                        with self.lock:
+                            self.live_streams[task_id] = {'kind': live_kind, 'text': REDACTION.sub('[REDACTED]', ''.join(buf))[-4000:]}
                 elif method in {'item/started', 'item/completed'}:
                     item = params.get('item') or {}
                     itype = item.get('type', '')
                     item_id = str(item.get('id', ''))
                     if itype in {'agentMessage', 'plan', 'agent_message'} and method == 'item/completed':
+                        with self.lock:
+                            self.live_streams.pop(task_id, None)
                         msg = item.get('text', '') or ''.join(delta_buffers.pop(item_id, []))
                         if msg and (not item_id or item_id not in emitted_messages):
                             if item_id:
@@ -1674,6 +1693,8 @@ class LocalCore:
                             lines.append(msg[:1500])
                             self.append(task_id, 'message', msg)
                     elif itype == 'reasoning' and method == 'item/completed':
+                        with self.lock:
+                            self.live_streams.pop(task_id, None)
                         summary_parts = item.get('summary') or []
                         r_txt = item.get('text', '') or ('\n'.join(str(s) for s in summary_parts if s) if isinstance(summary_parts, list) else '') or ''.join(delta_buffers.pop(item_id, []))
                         if r_txt and r_txt.strip() and (not item_id or item_id not in emitted_messages):
@@ -1695,8 +1716,14 @@ class LocalCore:
                                 detail = ', '.join(paths[:3])
                         elif not detail:
                             detail = str(item.get('tool', item.get('name', '')))
-                        label_detail = f' `{detail[:100]}`' if detail else ''
-                        self.append(task_id, 'tool', f'{norm_type}{label_detail}: {status}')
+                        label_detail = f' `{detail[:120]}`' if detail else ''
+                        if method == 'item/started':
+                            with self.lock:
+                                self.live_streams[task_id] = {'kind': 'status', 'text': f'Running {norm_type}{label_detail}...'}
+                        else:
+                            with self.lock:
+                                self.live_streams.pop(task_id, None)
+                            self.append(task_id, 'tool', f'{norm_type}{label_detail}: {status}')
                         if cmd_target and self.is_destructive_command(cmd_target):
                             if not self.request_approval(task_id, 'confirm_destructive', cmd_target):
                                 fail_marker = True
@@ -1926,6 +1953,7 @@ class LocalCore:
             else:
                 cmd = adapter.build_cmd(project_path, prompt_text, mode, thread, model)
 
+            pre_git_fp = self._git_fingerprint(project_path)
             if use_app_server and isinstance(adapter, CodexAdapter):
                 rc, output = self._run_codex_app_server(
                     task_id, adapter, project_path, prompt_text, mode, thread, model, sandbox_override=sandbox_override, timeout=1800
@@ -1972,11 +2000,19 @@ class LocalCore:
             if not command:
                 self.set_status(task_id,'NEEDS_VERIFICATION',verification='No supported npm/python build or test command found; do not claim verified success')
                 return
-            if needs_install and shutil.which('npm'):
-                rc_inst, inst_out = self._run(task_id, ['npm', 'install', '--no-audit', '--no-fund'], project_path, timeout=300, phase='verify')
-                if self.task(task_id)['status']=='CANCELLED': return
-                if rc_inst != 0:
-                    self.set_status(task_id,'FAILED',error=f'npm install failed (exit {rc_inst})',verification=inst_out); return
+            post_git_fp = self._git_fingerprint(project_path)
+            if pre_git_fp is not None and post_git_fp == pre_git_fp:
+                self.append(task_id, 'verification', 'Skipped build verification (read-only turn: no workspace files modified)')
+                self.set_status(task_id, 'COMPLETED', verification='Read-only turn: no workspace files modified; build verification skipped.')
+                return
+            if needs_install:
+                pkg_mgr = command[0] if command and command[0] in {'pnpm', 'yarn', 'bun', 'npm'} else 'npm'
+                if shutil.which(pkg_mgr):
+                    inst_cmd = [pkg_mgr, 'install'] + (['--no-audit', '--no-fund'] if pkg_mgr == 'npm' else [])
+                    rc_inst, inst_out = self._run(task_id, inst_cmd, project_path, timeout=300, phase='verify')
+                    if self.task(task_id)['status']=='CANCELLED': return
+                    if rc_inst != 0:
+                        self.set_status(task_id,'FAILED',error=f'{pkg_mgr} install failed (exit {rc_inst})',verification=inst_out); return
             for attempt in range(2):
                 rc, verify_output=self._run(task_id, command, project_path, timeout=300, phase='verify')
                 if self.task(task_id)['status']=='CANCELLED':return
@@ -2018,35 +2054,68 @@ class LocalCore:
                 pass
         finally:
             try:
+                with self.lock:
+                    self.live_streams.pop(task_id, None)
                 self.cleanup_worktree(project_name, task_id)
                 self._dispatch_next_queued_task(project_name)
             except Exception:
                 pass
 
+    @staticmethod
+    def _git_fingerprint(project_path: Path) -> str | None:
+        git_cmd = shutil.which('git')
+        if not git_cmd or not (project_path / '.git').exists():
+            return None
+        try:
+            head_res = subprocess.run([git_cmd, 'rev-parse', 'HEAD'], cwd=project_path, capture_output=True, text=True, timeout=5)
+            st_res = subprocess.run([git_cmd, 'status', '--porcelain'], cwd=project_path, capture_output=True, text=True, timeout=8)
+            if head_res.returncode != 0 or st_res.returncode != 0:
+                return None
+            return f"{head_res.stdout.strip()}\n{st_res.stdout}"
+        except Exception:
+            return None
+
+    @staticmethod
+    def _detect_js_runner(project_path: Path) -> str | None:
+        if (project_path / 'pnpm-lock.yaml').is_file() and shutil.which('pnpm'):
+            return 'pnpm'
+        if (project_path / 'yarn.lock').is_file() and shutil.which('yarn'):
+            return 'yarn'
+        if ((project_path / 'bun.lockb').is_file() or (project_path / 'bun.lock').is_file()) and shutil.which('bun'):
+            return 'bun'
+        if shutil.which('npm'):
+            return 'npm'
+        return None
+
     def _detect_verify_command(self, project_path: Path) -> tuple[list[str] | None, bool]:
         pkg = project_path / 'package.json'
-        if pkg.is_file():
+        runner = self._detect_js_runner(project_path)
+        if pkg.is_file() and runner:
             try:
                 pkg_json = json.loads(pkg.read_text(encoding='utf-8'))
                 scripts = pkg_json.get('scripts', {})
                 has_deps = bool(pkg_json.get('dependencies') or pkg_json.get('devDependencies'))
                 needs_install = has_deps and not (project_path / 'node_modules').is_dir()
-                if 'build' in scripts and shutil.which('npm'):
-                    return ['npm', 'run', 'build'], needs_install
-                if 'test' in scripts and shutil.which('npm'):
-                    cmd = ['npm', 'test', '--', '--runInBand'] if 'jest' in str(scripts.get('test', '')) else ['npm', 'test']
+                if 'build' in scripts:
+                    return [runner, 'run', 'build'] if runner != 'yarn' else ['yarn', 'build'], needs_install
+                if 'test' in scripts:
+                    if runner == 'npm':
+                        cmd = ['npm', 'test', '--', '--runInBand'] if 'jest' in str(scripts.get('test', '')) else ['npm', 'test']
+                    else:
+                        cmd = [runner, 'test']
                     return cmd, needs_install
             except (ValueError, OSError):
                 pass
         # Monorepo fallback: frontend/package.json
         fe_pkg = project_path / 'frontend' / 'package.json'
-        if fe_pkg.is_file() and shutil.which('npm'):
+        fe_runner = self._detect_js_runner(project_path / 'frontend') or runner
+        if fe_pkg.is_file() and fe_runner:
             try:
                 fe_scripts = json.loads(fe_pkg.read_text(encoding='utf-8')).get('scripts', {})
                 if 'build' in fe_scripts:
-                    return ['npm', '--prefix', 'frontend', 'run', 'build'], False
+                    return ['npm', '--prefix', 'frontend', 'run', 'build'] if fe_runner == 'npm' else [fe_runner, '--cwd', 'frontend', 'build'], False
                 if 'test' in fe_scripts:
-                    return ['npm', '--prefix', 'frontend', 'test'], False
+                    return ['npm', '--prefix', 'frontend', 'test'] if fe_runner == 'npm' else [fe_runner, '--cwd', 'frontend', 'test'], False
             except (ValueError, OSError):
                 pass
         # Python fallback: pytest or unittest

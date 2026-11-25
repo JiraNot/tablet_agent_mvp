@@ -130,6 +130,7 @@ fun TabletAgentApp() {
     var tasks by remember { mutableStateOf<List<JSONObject>>(emptyList()) }
     var selectedTask by rememberSaveable { mutableStateOf("") }
     var events by remember { mutableStateOf<List<JSONObject>>(emptyList()) }
+    var liveStream by remember { mutableStateOf<JSONObject?>(null) }
     var approvals by remember { mutableStateOf<List<JSONObject>>(emptyList()) }
     var eventCursor by rememberSaveable { mutableIntStateOf(0) }
     var previewUrl by remember { mutableStateOf("") }
@@ -283,6 +284,7 @@ fun TabletAgentApp() {
 
     LaunchedEffect(selectedTask) {
         events = emptyList()
+        liveStream = null
         approvals = emptyList()
         eventCursor = 0
     }
@@ -396,6 +398,7 @@ fun TabletAgentApp() {
                                         merged
                                     }
                                 }
+                                liveStream = page.optJSONObject("live_stream")
                                 keepPaging = page.optBoolean("has_more", false) && fresh.isNotEmpty()
                             }
                             if (activeTask != null || pollTick == 0) {
@@ -430,7 +433,8 @@ fun TabletAgentApp() {
             val hasRunningTask = tasks.any {
                 it.optString("status") in listOf("QUEUED", "PLANNING", "WAITING_APPROVAL", "EXECUTING", "VERIFYING", "REPAIRING")
             }
-            delay(if (hasRunningTask) 1100L else 3200L)
+            if (!hasRunningTask && liveStream != null) liveStream = null
+            delay(if (hasRunningTask) 700L else 3200L)
         }
     }
     LaunchedEffect(tab, selectedProject, fileDir) {
@@ -563,6 +567,7 @@ fun TabletAgentApp() {
                                 isNewChatMode = isNewChatMode,
                                 onNewChat = { selectedTask = ""; isNewChatMode = true; events = emptyList(); eventCursor = 0 },
                                 events = events, approvals = approvals,
+                                liveStream = liveStream,
                                 canRun = online && token.isNotBlank() && selectedProject.isNotBlank(),
                                 onSend = {
                                     scope.launch {
@@ -634,6 +639,7 @@ fun TabletAgentApp() {
                                             isNewChatMode = isNewChatMode,
                                             onNewChat = { selectedTask = ""; isNewChatMode = true; events = emptyList(); eventCursor = 0 },
                                             events = events, approvals = approvals,
+                                            liveStream = liveStream,
                                             canRun = online && token.isNotBlank() && selectedProject.isNotBlank(),
                                             onSend = {
                                                 scope.launch {

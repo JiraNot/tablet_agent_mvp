@@ -629,7 +629,8 @@ fun ClaudeCodeTopBar(
     onExportProject: () -> Unit = {},
     onViewMemory: () -> Unit = {},
     onUploadAttachment: (suspend (String, String) -> String?)? = null,
-    onApplyCode: ((filename: String, code: String) -> Unit)? = null
+    onApplyCode: ((filename: String, code: String) -> Unit)? = null,
+    liveStream: JSONObject? = null
 ) {
     Surface(
         color = MaterialTheme.colorScheme.surface,
@@ -1183,7 +1184,8 @@ fun AionClaudeAgentPane(
     onExportProject: () -> Unit = {},
     onViewMemory: () -> Unit = {},
     onUploadAttachment: (suspend (String, String) -> String?)? = null,
-    onApplyCode: ((filename: String, code: String) -> Unit)? = null
+    onApplyCode: ((filename: String, code: String) -> Unit)? = null,
+    liveStream: JSONObject? = null
 ) {
     val rawAgents = if (agents.isNotEmpty()) agents.map {
         Triple(it.optString("name"), it.optString("display_name"), it.optBoolean("available", true))
@@ -2394,20 +2396,34 @@ fun AionClaudeAgentPane(
             val groupedTurns = remember(events) { groupEventsIntoChatTurns(events) }
             val listState = rememberLazyListState()
             val lastEventSeq = events.lastOrNull()?.optInt("seq", 0) ?: 0
-            LaunchedEffect(lastEventSeq) {
+            val userTurnCount = remember(groupedTurns) { groupedTurns.count { it is ChatTurnItem.UserTurn } }
+            val liveKind = liveStream?.optString("kind", "") ?: ""
+            val liveText = liveStream?.optString("text", "") ?: ""
+            val hasLivePreviewCard = isRunning && liveText.isNotBlank() && (liveKind == "message" || liveKind == "thought")
+            val canScrollDown by remember { derivedStateOf { listState.canScrollForward } }
+            val scrollScope = rememberCoroutineScope()
+
+            LaunchedEffect(userTurnCount) {
+                if (userTurnCount > 0 && groupedTurns.isNotEmpty()) {
+                    listState.scrollToItem(groupedTurns.size)
+                }
+            }
+            LaunchedEffect(lastEventSeq, liveText.length) {
                 if (isRunning && groupedTurns.isNotEmpty() && !listState.isScrollInProgress) {
                     val isNearBottom = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index?.let {
                         it >= groupedTurns.size - 2
                     } ?: true
                     if (isNearBottom) {
-                        listState.scrollToItem(groupedTurns.size)
+                        val extra = if (hasLivePreviewCard) 1 else 0
+                        listState.scrollToItem(groupedTurns.size + extra)
                     }
                 }
             }
 
+            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
             LazyColumn(
                 state = listState,
-                modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp),
+                modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
                 contentPadding = PaddingValues(vertical = 10.dp)
             ) {
@@ -2572,16 +2588,59 @@ fun AionClaudeAgentPane(
                     }
                 }
 
-                // 3. Live Streaming Activity Pill when task is actively running
+                // 3. Live Streaming Delta Preview & Activity Pill when task is actively running
+                if (hasLivePreviewCard) {
+                    item(key = "live-delta-preview", contentType = "live_delta") {
+                        if (liveKind == "thought") {
+                            ThoughtAccordionCard(turn = ChatTurnItem.ThoughtTurn(-999, liveText))
+                        } else {
+                            StreamingAssistantMessageCard(
+                                turn = ChatTurnItem.MessageTurn(-999, liveText, liveText.count { it == '\n' } + 1),
+                                agentInitial = taskAgent.firstOrNull()?.uppercase() ?: "A",
+                                agentTitle = taskAgent.replaceFirstChar { it.uppercase() },
+                                isLatestAndRunning = false,
+                                onApplyCode = null
+                            )
+                        }
+                    }
+                }
                 if (isRunning) {
                     item(key = "live-streaming-indicator", contentType = "streaming_indicator") {
+                        val liveStatusMsg = if (liveKind == "status" && liveText.isNotBlank()) liveText
+                        else events.lastOrNull()?.optString("message", "") ?: ""
                         LiveStreamingIndicatorPill(
                             status = currentTaskStatus,
                             agentName = taskAgent.replaceFirstChar { it.uppercase() },
-                            latestEvent = events.lastOrNull()?.optString("message", "") ?: ""
+                            latestEvent = liveStatusMsg
                         )
                     }
                 }
+            }
+
+            if (canScrollDown) {
+                Surface(
+                    onClick = {
+                        scrollScope.launch {
+                            val targetIdx = maxOf(0, groupedTurns.size + (if (hasLivePreviewCard) 1 else 0))
+                            listState.animateScrollToItem(targetIdx)
+                        }
+                    },
+                    shape = RoundedCornerShape(50),
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    shadowElevation = 4.dp,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)),
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(end = 18.dp, bottom = 12.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                    ) {
+                        Icon(Icons.Default.ArrowDownward, contentDescription = "Jump to latest", modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.width(4.dp))
+                        Text("Latest", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                    }
+                }
+            }
             }
 
             // Android App Builder Ready Card in active chat thread
@@ -3016,7 +3075,7 @@ private fun ToolBatchAccordionCard(
                             fontWeight = FontWeight.SemiBold,
                             color = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.weight(1f),
-                            maxLines = 1,
+                            maxLines = 3,
                             overflow = TextOverflow.Ellipsis
                         )
                         Spacer(Modifier.width(6.dp))
