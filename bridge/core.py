@@ -2328,6 +2328,14 @@ class LocalCore:
             commit_cmd = [git_cmd]
             gh_user = os.environ.get('GITHUB_USER', '').strip()
             gh_email = os.environ.get('GITHUB_EMAIL', '').strip()
+            if not gh_user:
+                chk_u = subprocess.run([git_cmd, 'config', 'user.name'], cwd=base, capture_output=True, text=True, timeout=5)
+                if chk_u.returncode != 0 or not chk_u.stdout.strip():
+                    gh_user = 'Tablet Developer'
+            if not gh_email:
+                chk_e = subprocess.run([git_cmd, 'config', 'user.email'], cwd=base, capture_output=True, text=True, timeout=5)
+                if chk_e.returncode != 0 or not chk_e.stdout.strip():
+                    gh_email = 'agent@tablet.local'
             if gh_user:
                 commit_cmd += ['-c', f'user.name={gh_user}']
             if gh_email:
@@ -2720,7 +2728,7 @@ class LocalCore:
         owner = ''
         repo = ''
         if remote_url:
-            m = re.search(r'github\.com[:/]([^/]+)/([^/.]+)', remote_url)
+            m = re.search(r'github\.com[:/]([^/]+)/([^/\s]+?)(?:\.git)?/?$', remote_url)
             if m:
                 owner = m.group(1)
                 repo = m.group(2)
@@ -2774,7 +2782,7 @@ class LocalCore:
         if not remote_url:
             raise BridgeError('No git remote "origin" found. Please push to GitHub first.', 400)
 
-        m = re.search(r'github\.com[:/]([^/]+)/([^/.]+)', remote_url)
+        m = re.search(r'github\.com[:/]([^/]+)/([^/\s]+?)(?:\.git)?/?$', remote_url)
         if not m:
             raise BridgeError(f'Remote origin is not a recognized GitHub URL: {remote_url}', 400)
         owner = m.group(1)

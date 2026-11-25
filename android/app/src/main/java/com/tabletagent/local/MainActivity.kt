@@ -2905,6 +2905,7 @@ fun GitReviewDialog(
                                                     val res = api.gitAiCommit(project)
                                                     commitMessage = res.optString("message", "feat: update project files")
                                                 } catch (e: Exception) {
+                                                    gitBanner = false to (e.message ?: "AI Commit Msg failed")
                                                     notify(e)
                                                 } finally {
                                                     aiGenerating = false
@@ -3102,6 +3103,7 @@ fun GitReviewDialog(
                                                             }
                                                             refresh()
                                                         } catch (e: Exception) {
+                                                            gitBanner = false to (e.message ?: "Pull failed")
                                                             notify(e)
                                                         } finally {
                                                             pulling = false
