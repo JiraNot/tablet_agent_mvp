@@ -3927,6 +3927,53 @@ if __name__ == '__main__':
         chosen_pack = (build_pack or '').strip() or ('dockerfile' if (p_dir / 'Dockerfile').is_file() else 'nixpacks')
         chosen_branch = (branch or '').strip() or 'main'
         app_name = (name or '').strip() or f'{project}-staging'
+
+        repo_slug = ''
+        m_slug = re.search(r'github\.com[:/]([^/]+/[^/\s]+?)(?:\.git)?/?$', git_repo)
+        if m_slug:
+            repo_slug = m_slug.group(1)
+
+        github_app_uuid = ''
+        private_key_uuid = ''
+        try:
+            existing_apps = self._coolify_request(base_url, token, '/applications')
+            if isinstance(existing_apps, list):
+                for ea in existing_apps:
+                    if not isinstance(ea, dict):
+                        continue
+                    ea_repo = str(ea.get('git_repository') or '').lower()
+                    if repo_slug and repo_slug.lower() in ea_repo:
+                        src = ea.get('source') if isinstance(ea.get('source'), dict) else {}
+                        if src.get('uuid') and ('github' in str(ea.get('source_type') or '').lower() or src.get('app_id')):
+                            github_app_uuid = str(src['uuid'])
+                            break
+                        if ea.get('private_key_id') or ea.get('private_key_uuid'):
+                            private_key_uuid = str(ea.get('private_key_uuid') or '')
+        except BridgeError:
+            pass
+
+        if not github_app_uuid:
+            try:
+                gh_apps = self._coolify_request(base_url, token, '/github-apps')
+                if isinstance(gh_apps, list):
+                    for ga in gh_apps:
+                        if isinstance(ga, dict) and ga.get('uuid'):
+                            github_app_uuid = str(ga['uuid'])
+                            break
+            except BridgeError:
+                pass
+
+        if not github_app_uuid and not private_key_uuid:
+            try:
+                keys = self._coolify_request(base_url, token, '/security/keys')
+                if isinstance(keys, list):
+                    for k in keys:
+                        if isinstance(k, dict) and k.get('uuid'):
+                            private_key_uuid = str(k['uuid'])
+                            break
+            except BridgeError:
+                pass
+
         payload = {
             'project_uuid': project_uuid,
             'server_uuid': server_uuid,
@@ -3938,7 +3985,22 @@ if __name__ == '__main__':
             'name': app_name,
             'instant_deploy': True,
         }
-        res = self._coolify_request(base_url, token, '/applications/public', method='POST', json_body=payload)
+        auth_mode = 'public'
+        endpoint = '/applications/public'
+        if github_app_uuid:
+            auth_mode = 'private-gh-app'
+            endpoint = '/applications/private-gh-app'
+            payload['github_app_uuid'] = github_app_uuid
+            if repo_slug:
+                payload['git_repository'] = repo_slug
+        elif private_key_uuid:
+            auth_mode = 'private-deploy-key'
+            endpoint = '/applications/private-deploy-key'
+            payload['private_key_uuid'] = private_key_uuid
+            if repo_slug:
+                payload['git_repository'] = f'git@github.com:{repo_slug}.git'
+
+        res = self._coolify_request(base_url, token, endpoint, method='POST', json_body=payload)
         app_uuid = str(res.get('uuid') or '') if isinstance(res, dict) else ''
         if not app_uuid:
             raise BridgeError('Coolify did not return an application UUID', 502)
@@ -3956,6 +4018,7 @@ if __name__ == '__main__':
             'name': app_name,
             'git_branch': chosen_branch,
             'build_pack': chosen_pack,
+            'auth_mode': auth_mode,
             'environment_name': env_name,
             'project_uuid': project_uuid,
             'server_uuid': server_uuid,

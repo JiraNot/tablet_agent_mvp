@@ -199,11 +199,47 @@ class CoolifyIntegrationTests(unittest.TestCase):
         self.assertTrue(res['success'])
         self.assertEqual(res['app_uuid'], 'app-stg-99')
         self.assertEqual(res['build_pack'], 'dockerfile')
+        self.assertEqual(res['auth_mode'], 'public')
         linked = self.core._get_coolify_link('controlaistudio')
         self.assertEqual(linked['app_uuid'], 'app-stg-99')
         ctx = self.core._build_coolify_context_for_project('controlaistudio')
         self.assertIn('tablet-coolify', ctx)
         self.assertNotIn('tok-ram-999', ctx)
+
+    def test_coolify_create_staging_uses_github_app_for_private_repo(self):
+        proj = self.core.workspaces / 'privapp'
+        proj.mkdir(parents=True)
+        subprocess.run(['git', 'init'], cwd=proj, check=True, capture_output=True)
+        subprocess.run(
+            ['git', 'remote', 'add', 'origin', 'https://github.com/acme/privapp.git'],
+            cwd=proj,
+            check=True,
+            capture_output=True,
+        )
+
+        self.core.coolify_sync_runtime('https://manage.onetapweb.com', 'tok-priv-1')
+
+        def fake_req(base_url, token, path, method='GET', json_body=None):
+            if path == '/servers':
+                return [{'uuid': 'srv-1'}]
+            if path == '/projects':
+                return [{'uuid': 'prj-1', 'name': 'privapp', 'environments': [{'name': 'staging'}]}]
+            if path == '/applications':
+                return []
+            if path == '/github-apps':
+                return [{'uuid': 'ghapp-77', 'name': 'acme-gh-app'}]
+            if path == '/applications/private-gh-app' and method == 'POST':
+                self.assertEqual(json_body['github_app_uuid'], 'ghapp-77')
+                self.assertEqual(json_body['git_repository'], 'acme/privapp')
+                return {'uuid': 'app-priv-stg'}
+            return {}
+
+        with mock.patch.object(self.core, '_coolify_request', side_effect=fake_req):
+            res = self.core.coolify_create_staging('privapp', branch='main')
+
+        self.assertTrue(res['success'])
+        self.assertEqual(res['auth_mode'], 'private-gh-app')
+        self.assertEqual(res['app_uuid'], 'app-priv-stg')
 
 
 if __name__ == '__main__':
