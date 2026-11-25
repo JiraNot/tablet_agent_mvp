@@ -161,6 +161,9 @@ private sealed interface ChatTurnItem {
     data class MessageTurn(val seq: Int, val text: String, val lineCount: Int) : ChatTurnItem {
         override val key: String = "msg-$seq"
     }
+    data class ThoughtTurn(val seq: Int, val text: String) : ChatTurnItem {
+        override val key: String = "thought-$seq"
+    }
     data class VerifyGroup(val id: String, val headline: String, val extraLines: List<String>) : ChatTurnItem {
         override val key: String = "verify-$id"
     }
@@ -224,12 +227,14 @@ private fun groupEventsIntoChatTurns(events: List<JSONObject>): List<ChatTurnIte
     fun flushVerifies() {
         if (pendingVerifies.isNotEmpty()) {
             val firstSeq = pendingVerifies.first().first
-            val lines = pendingVerifies.map { it.second }
+            val lines = pendingVerifies.flatMap { it.second.lines() }.filter { it.isNotBlank() }
             result.add(
                 ChatTurnItem.VerifyGroup(
                     id = "$firstSeq",
-                    headline = lines.firstOrNull() ?: "Verification completed",
-                    extraLines = lines.drop(1)
+                    headline = lines.lastOrNull { it.contains("success", true) || it.contains("Tasks:", true) || it.contains("Verified", true) || it.contains("FAILED", true) }
+                        ?: lines.firstOrNull()
+                        ?: "Verification completed",
+                    extraLines = lines
                 )
             )
             pendingVerifies.clear()
@@ -259,6 +264,13 @@ private fun groupEventsIntoChatTurns(events: List<JSONObject>): List<ChatTurnIte
                 flushVerifies()
                 if (msg.isNotEmpty()) {
                     result.add(ChatTurnItem.MessageTurn(seq, msg, msg.count { it == '\n' } + 1))
+                }
+            }
+            "thought", "reasoning" -> {
+                flushTools()
+                flushVerifies()
+                if (msg.isNotEmpty()) {
+                    result.add(ChatTurnItem.ThoughtTurn(seq, msg))
                 }
             }
             "error" -> {
@@ -2453,6 +2465,7 @@ fun AionClaudeAgentPane(
                             is ChatTurnItem.ToolBatch -> "tool_batch"
                             is ChatTurnItem.UserTurn -> "user_turn"
                             is ChatTurnItem.MessageTurn -> "message"
+                            is ChatTurnItem.ThoughtTurn -> "thought"
                             is ChatTurnItem.VerifyGroup -> "verify"
                             is ChatTurnItem.ErrorTurn -> "error"
                         }
@@ -2521,6 +2534,10 @@ fun AionClaudeAgentPane(
                                 isLatestAndRunning = isRunning && turn == groupedTurns.lastOrNull(),
                                 onApplyCode = { fname, code -> applyCodeData = Pair(fname, code) }
                             )
+                        }
+
+                        is ChatTurnItem.ThoughtTurn -> {
+                            ThoughtAccordionCard(turn = turn)
                         }
 
                         is ChatTurnItem.VerifyGroup -> {
@@ -3032,6 +3049,58 @@ private fun ToolBatchAccordionCard(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun ThoughtAccordionCard(turn: ChatTurnItem.ThoughtTurn) {
+    var expanded by rememberSaveable("thought-${turn.seq}") { mutableStateOf(false) }
+    val previewLine = turn.text.lines().firstOrNull { it.isNotBlank() }?.take(90) ?: "Agent reasoning"
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 34.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.4f))
+            .border(1.dp, MaterialTheme.colorScheme.secondary.copy(alpha = 0.3f), RoundedCornerShape(10.dp))
+            .clickable { expanded = !expanded }
+            .padding(horizontal = 10.dp, vertical = 7.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                Icons.Default.Psychology,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.secondary,
+                modifier = Modifier.size(15.dp)
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                if (expanded) "Thinking / Reasoning" else "Thought: $previewLine",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            Icon(
+                if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.secondary,
+                modifier = Modifier.size(16.dp)
+            )
+        }
+        if (expanded) {
+            Spacer(Modifier.height(6.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.2f))
+            Spacer(Modifier.height(6.dp))
+            Text(
+                turn.text,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.9f),
+                lineHeight = 18.sp
+            )
         }
     }
 }

@@ -1352,8 +1352,13 @@ class LocalCore:
             self.procs[task_id] = proc
         deadline=time.monotonic()+timeout
         lines=[]
+        verify_buf=[]
         done_marker=False
         fail_marker=False
+        def flush_verify():
+            if verify_buf:
+                self.append(task_id, 'verification', '\n'.join(verify_buf)[:3000])
+                verify_buf.clear()
         try:
             # Background watchdog enforces deadline even when stdout is blocked.
             done=threading.Event()
@@ -1409,9 +1414,14 @@ class LocalCore:
                                 msg=item.get('text','')
                                 if msg:
                                     lines.append(msg[:1500]); self.append(task_id,'message',msg)
+                            elif item.get('type')=='reasoning' and kind=='item.completed':
+                                r_txt = item.get('text', '') or '\n'.join(item.get('summary') or [])
+                                if isinstance(r_txt, str) and r_txt.strip():
+                                    self.append(task_id, 'thought', r_txt.strip()[:2000])
                             elif item.get('type') in {'command_execution','file_change'}:
                                 cmd_target = str(item.get('command', item.get('target', '')))
-                                self.append(task_id,'tool',f"{item.get('type')}: {item.get('status','')}")
+                                detail = f' `{cmd_target[:100]}`' if cmd_target else ''
+                                self.append(task_id,'tool',f"{item.get('type')}{detail}: {item.get('status','')}")
                                 if self.is_destructive_command(cmd_target):
                                     if not self.request_approval(task_id, 'confirm_destructive', cmd_target):
                                         fail_marker = True
@@ -1466,7 +1476,11 @@ class LocalCore:
                         else:
                             self.append(task_id,'log',line[:800])
                 else:
-                    lines.append(line[:800]); self.append(task_id,'verification',line[:1200])
+                    lines.append(line[:800])
+                    verify_buf.append(line[:400])
+                    if len(verify_buf) >= 20:
+                        flush_verify()
+            flush_verify()
             proc.wait(timeout=2)
             if phase == 'agent' and proc.returncode == 0 and (not done_marker or fail_marker):
                 if 'llama' in cmd[0] or '-m' in cmd:
@@ -1643,7 +1657,7 @@ class LocalCore:
                         active_turn_id = t_id
                         with self.lock:
                             self.app_server_turns[task_id] = (proc, active_thread_id, active_turn_id)
-                elif method in {'item/agentMessage/delta', 'item/plan/delta'}:
+                elif method in {'item/agentMessage/delta', 'item/plan/delta', 'item/reasoning/summaryTextDelta', 'item/reasoning/textDelta'}:
                     item_id = str(params.get('itemId', 'default'))
                     delta = str(params.get('delta', ''))
                     if delta:
@@ -1659,14 +1673,30 @@ class LocalCore:
                                 emitted_messages.add(item_id)
                             lines.append(msg[:1500])
                             self.append(task_id, 'message', msg)
+                    elif itype == 'reasoning' and method == 'item/completed':
+                        summary_parts = item.get('summary') or []
+                        r_txt = item.get('text', '') or ('\n'.join(str(s) for s in summary_parts if s) if isinstance(summary_parts, list) else '') or ''.join(delta_buffers.pop(item_id, []))
+                        if r_txt and r_txt.strip() and (not item_id or item_id not in emitted_messages):
+                            if item_id:
+                                emitted_messages.add(item_id)
+                            self.append(task_id, 'thought', r_txt.strip()[:2000])
                     elif itype in {'commandExecution', 'fileChange', 'mcpToolCall', 'dynamicToolCall', 'command_execution', 'file_change'}:
                         norm_type = (
                             'command_execution' if itype in {'commandExecution', 'command_execution'}
                             else ('file_change' if itype in {'fileChange', 'file_change'} else itype)
                         )
                         status = item.get('status', 'in_progress' if method == 'item/started' else 'completed')
-                        self.append(task_id, 'tool', f'{norm_type}: {status}')
                         cmd_target = str(item.get('command', item.get('target', '')))
+                        detail = cmd_target
+                        if not detail and norm_type == 'file_change':
+                            changes = item.get('changes') or []
+                            if isinstance(changes, list) and changes:
+                                paths = [str(c.get('path', '')) for c in changes if isinstance(c, dict) and c.get('path')]
+                                detail = ', '.join(paths[:3])
+                        elif not detail:
+                            detail = str(item.get('tool', item.get('name', '')))
+                        label_detail = f' `{detail[:100]}`' if detail else ''
+                        self.append(task_id, 'tool', f'{norm_type}{label_detail}: {status}')
                         if cmd_target and self.is_destructive_command(cmd_target):
                             if not self.request_approval(task_id, 'confirm_destructive', cmd_target):
                                 fail_marker = True

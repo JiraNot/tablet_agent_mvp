@@ -386,7 +386,15 @@ fun TabletAgentApp() {
                                     if (fresh.isNotEmpty()) {
                                         eventCursor = fresh.last().optInt("seq", eventCursor)
                                     }
-                                    events = (events + prefix + fresh).takeLast(220)
+                                    val merged = events + prefix + fresh
+                                    events = if (merged.size > 600) {
+                                        val importantKinds = setOf("user", "message", "thought", "reasoning", "error")
+                                        val important = merged.filter { it.optString("kind").lowercase() in importantKinds }
+                                        val others = merged.filter { it.optString("kind").lowercase() !in importantKinds }.takeLast(250)
+                                        (important + others).sortedBy { it.optInt("seq", 0) }
+                                    } else {
+                                        merged
+                                    }
                                 }
                                 keepPaging = page.optBoolean("has_more", false) && fresh.isNotEmpty()
                             }
@@ -2640,6 +2648,7 @@ fun GitReviewDialog(
     onAutoFixPrompt: ((String) -> Unit)? = null
 ) {
     val scope = rememberCoroutineScope()
+    val dialogCtx = LocalContext.current
     var selectedTab by remember { mutableStateOf(0) } // 0: Changes, 1: Branches & Sync, 2: History, 3: Worktrees
     var loading by remember { mutableStateOf(true) }
     var statusObj by remember { mutableStateOf<JSONObject?>(null) }
@@ -2682,6 +2691,7 @@ fun GitReviewDialog(
     var prBody by remember { mutableStateOf("") }
     var showPrSuccessDialog by remember { mutableStateOf(false) }
     var createdPrUrl by remember { mutableStateOf("") }
+    var gitBanner by remember { mutableStateOf<Pair<Boolean, String>?>(null) }
 
     fun refresh() {
         loading = true
@@ -2802,6 +2812,39 @@ fun GitReviewDialog(
                         }
                     )
                 }
+
+                gitBanner?.let { (isSuccess, msg) ->
+                    Surface(
+                        color = if (isSuccess) Color(0xFF065F46) else Color(0xFF991B1B),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                        ) {
+                            Icon(
+                                if (isSuccess) Icons.Default.CheckCircle else Icons.Default.Error,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                msg,
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.weight(1f),
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            IconButton(onClick = { gitBanner = null }, modifier = Modifier.size(22.dp)) {
+                                Icon(Icons.Default.Close, contentDescription = "Dismiss", tint = Color.White, modifier = Modifier.size(14.dp))
+                            }
+                        }
+                    }
+                }
             }
         },
         text = {
@@ -2851,25 +2894,9 @@ fun GitReviewDialog(
                                         Text(if (aiGenerating) "Generating…" else "✨ AI Auto-Commit Msg", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                                     }
 
-                                    FilledTonalButton(
-                                    onClick = {
-                                        showAuditDialog = true
-                                        auditLoading = true
-                                        scope.launch {
-                                            runCatching { api.gitAudit(project) }
-                                                .onSuccess { auditResult = it }
-                                                .onFailure { notify(it) }
-                                            auditLoading = false
-                                        }
-                                    },
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Icon(Icons.Default.Security, null, modifier = Modifier.size(16.dp))
-                                    Spacer(Modifier.width(6.dp))
-                                    Text("🛡️ Run AI Pre-Commit & Security Audit")
-                                }
+                                    Spacer(Modifier.weight(1f))
 
-                                if (!clean) {
+                                    if (!clean) {
                                         OutlinedButton(
                                             onClick = { showDiscardAllConfirm = true },
                                             colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFEF4444)),
@@ -3362,10 +3389,16 @@ fun GitReviewDialog(
                             committing = true
                             scope.launch {
                                 try {
-                                    api.gitCommit(project, commitMessage.trim())
+                                    val cRes = api.gitCommit(project, commitMessage.trim())
+                                    val sha = cRes.optString("sha", "").take(7)
+                                    HapticFeedbackHelper.vibrateSuccess(dialogCtx)
+                                    gitBanner = true to if (sha.isNotBlank()) "✅ Committed ($sha): ${commitMessage.trim()}" else "✅ Committed changes successfully!"
+                                    commitMessage = ""
                                     refresh()
                                     onCommitted()
                                 } catch (e: Exception) {
+                                    HapticFeedbackHelper.vibrateError(dialogCtx)
+                                    gitBanner = false to (e.message ?: "Commit failed")
                                     notify(e)
                                 } finally {
                                     committing = false
@@ -3596,13 +3629,17 @@ fun GitReviewDialog(
                                     showPushDialog = false
                                     refresh()
                                     HapticFeedbackHelper.vibrateSuccess(ctx)
-                                    notify(Throwable("Created & Pushed: ${res.optString("html_url", res.optString("repo_name"))}"))
+                                    val urlMsg = res.optString("html_url", res.optString("repo_name"))
+                                    gitBanner = true to "✅ Created & Pushed: $urlMsg"
+                                    notify(Throwable("Created & Pushed: $urlMsg"))
                                 } else {
                                     val res = api.gitPush(project, "origin", currentBranch, token = ghToken)
                                     showPushDialog = false
                                     refresh()
                                     HapticFeedbackHelper.vibrateSuccess(ctx)
-                                    notify(Throwable("Pushed successfully: ${res.optString("branch")}"))
+                                    val br = res.optString("branch", currentBranch)
+                                    gitBanner = true to "✅ Pushed branch '$br' to origin successfully!"
+                                    notify(Throwable("Pushed successfully: $br"))
                                     // If pushed branch is not main/master, prompt to create PR
                                     if (currentBranch != "main" && currentBranch != "master") {
                                         runCatching {
@@ -3617,6 +3654,7 @@ fun GitReviewDialog(
                                 }
                             } catch (e: Exception) {
                                 HapticFeedbackHelper.vibrateError(ctx)
+                                gitBanner = false to (e.message ?: "Push failed")
                                 notify(e)
                             } finally {
                                 pushing = false
