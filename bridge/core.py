@@ -3644,7 +3644,7 @@ def main():
         return 0
     cmd = args[0]
     port = os.environ.get('TABLET_BRIDGE_PORT', '8765').strip() or '8765'
-    tok_file = os.environ.get('TABLET_BRIDGE_TOKEN_FILE', '').strip()
+    tok_file = os.environ.get('TABLET_BRIDGE_TOKEN_FILE', '').strip() or ''' + repr(str(self.token_path)) + '''
     token = ''
     if tok_file and Path(tok_file).is_file():
         token = Path(tok_file).read_text(encoding='utf-8').strip()
@@ -3706,6 +3706,16 @@ if __name__ == '__main__':
                 cli_path.chmod(0o755)
             except Exception:
                 pass
+            # Also install into /usr/local/bin so login shells (`/bin/sh -lc`) always find `tablet-coolify`
+            if os.name == 'posix':
+                try:
+                    sys_bin = Path('/usr/local/bin')
+                    if sys_bin.is_dir():
+                        sys_cli = sys_bin / 'tablet-coolify'
+                        sys_cli.write_text(script, encoding='utf-8')
+                        sys_cli.chmod(0o755)
+                except Exception:
+                    pass
             os.environ['TABLET_BRIDGE_TOKEN_FILE'] = str(self.token_path)
             cur_path = os.environ.get('PATH', '')
             if str(bin_dir) not in cur_path.split(os.pathsep):
