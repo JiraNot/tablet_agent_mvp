@@ -229,5 +229,11 @@ class GitTests(unittest.TestCase):
         self.assertNotIn('github_pat_', redacted)
         self.assertIn('[REDACTED]', redacted)
 
+        # Test no duplicate Authorization header args
+        auth_args = self.core._github_auth_git_args('ghp_testtoken1234567890')
+        self.assertIn('credential.helper=', auth_args)
+        self.assertIn('http.https://github.com/.extraheader=', auth_args)
+        self.assertTrue(any('AUTHORIZATION: basic ' in a for a in auth_args))
+
 if __name__ == '__main__':
     unittest.main()

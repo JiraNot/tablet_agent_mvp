@@ -719,6 +719,20 @@ class LocalCore:
                 ans.append({'name': p.name, 'git': (p / '.git').exists(), 'package_json': (p / 'package.json').exists()})
         return ans
 
+    @staticmethod
+    def _github_auth_git_args(gh_token: str) -> list[str]:
+        """Return git -c args that authenticate GitHub HTTPS without duplicate Authorization headers."""
+        tok = (gh_token or '').strip()
+        if not tok:
+            return []
+        import base64
+        basic = base64.b64encode(f'x-access-token:{tok}'.encode('utf-8')).decode('ascii')
+        return [
+            '-c', 'credential.helper=',
+            '-c', 'http.https://github.com/.extraheader=',
+            '-c', f'http.https://github.com/.extraheader=AUTHORIZATION: basic {basic}',
+        ]
+
     def create_project(self, name: str, git_url: str = '', token: str = '') -> dict[str, Any]:
         if not NAME_RE.fullmatch(name) or name in {'.', '..'}:
             raise BridgeError('Invalid project name')
@@ -752,9 +766,7 @@ class LocalCore:
                 clone_env = os.environ.copy()
                 clone_env['GIT_TERMINAL_PROMPT'] = '0'
                 if gh_token:
-                    import base64
-                    basic = base64.b64encode(f'x-access-token:{gh_token}'.encode('utf-8')).decode('ascii')
-                    clone_cmd += ['-c', f'http.https://github.com/.extraheader=AUTHORIZATION: basic {basic}']
+                    clone_cmd += self._github_auth_git_args(gh_token)
                 clone_cmd += ['--', clean_url, str(target)]
                 res = subprocess.run(clone_cmd, timeout=160, capture_output=True, text=True, env=clone_env)
                 if res.returncode != 0:
@@ -2400,9 +2412,7 @@ class LocalCore:
         push_env = os.environ.copy()
         push_env['GIT_TERMINAL_PROMPT'] = '0'
         if gh_token:
-            import base64
-            basic = base64.b64encode(f'x-access-token:{gh_token}'.encode('utf-8')).decode('ascii')
-            push_cmd += ['-c', f'http.https://github.com/.extraheader=AUTHORIZATION: basic {basic}']
+            push_cmd += self._github_auth_git_args(gh_token)
         # If remote is git@github.com:... and we have an HTTPS token, push via HTTPS URL instead of SSH
         push_target = rem
         if gh_token:
@@ -2519,15 +2529,9 @@ class LocalCore:
             subprocess.run([git_cmd, 'remote', 'add', 'origin', clone_url], cwd=base, capture_output=True, timeout=10)
 
         # 7. Push branch to GitHub
-        import base64
-        basic = base64.b64encode(f'x-access-token:{gh_token}'.encode('utf-8')).decode('ascii')
         push_env = os.environ.copy()
         push_env['GIT_TERMINAL_PROMPT'] = '0'
-        push_cmd = [
-            git_cmd,
-            '-c', f'http.https://github.com/.extraheader=AUTHORIZATION: basic {basic}',
-            'push', '-u', 'origin', target_branch
-        ]
+        push_cmd = [git_cmd] + self._github_auth_git_args(gh_token) + ['push', '-u', 'origin', target_branch]
         res = subprocess.run(push_cmd, cwd=base, capture_output=True, text=True, timeout=60, env=push_env)
         combined = REDACTION.sub('[REDACTED]', (res.stdout + '\n' + res.stderr).strip())
         if res.returncode != 0:
@@ -2584,9 +2588,7 @@ class LocalCore:
         pull_env = os.environ.copy()
         pull_env['GIT_TERMINAL_PROMPT'] = '0'
         if gh_token:
-            import base64
-            basic = base64.b64encode(f'x-access-token:{gh_token}'.encode('utf-8')).decode('ascii')
-            pull_cmd += ['-c', f'http.https://github.com/.extraheader=AUTHORIZATION: basic {basic}']
+            pull_cmd += self._github_auth_git_args(gh_token)
         pull_cmd += ['pull', rem, target_branch] if target_branch else ['pull', rem]
         res = subprocess.run(pull_cmd, cwd=base, capture_output=True, text=True, timeout=60, env=pull_env)
         combined = REDACTION.sub('[REDACTED]', (res.stdout + '\n' + res.stderr).strip())
