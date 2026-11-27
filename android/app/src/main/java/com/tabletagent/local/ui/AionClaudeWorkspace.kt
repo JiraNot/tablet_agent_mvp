@@ -674,6 +674,7 @@ fun ClaudeCodeTopBar(
     onOpenGit: () -> Unit,
     onOpenCoolify: () -> Unit = {},
     onOpenSkills: () -> Unit = {},
+    onOpenMcp: () -> Unit = {},
     onOpenSlm: () -> Unit = {},
     apks: List<JSONObject> = emptyList(),
     onInstallApk: (String) -> Unit = {},
@@ -917,6 +918,23 @@ fun ClaudeCodeTopBar(
                             Icon(
                                 Icons.Default.AutoAwesome,
                                 contentDescription = "Skills",
+                                modifier = Modifier.size(14.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        // Compact Icon Button for MCP Servers
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier
+                                .size(28.dp)
+                                .clip(RoundedCornerShape(7.dp))
+                                .background(MaterialTheme.colorScheme.surfaceVariant)
+                                .clickable { onOpenMcp() }
+                        ) {
+                            Icon(
+                                Icons.Default.Hub,
+                                contentDescription = "MCP",
                                 modifier = Modifier.size(14.dp),
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant
                             )

@@ -226,4 +226,31 @@ class LocalApi(private val deviceToken: String, port: Int = 8765) {
         request("POST", "/v1/skills/toggle", JSONObject().put("project", project).put("skill_id", skillId).put("enabled", enabled))
     suspend fun createCustomSkill(project: String, name: String, description: String, instruction: String): JSONObject =
         request("POST", "/v1/skills/custom", JSONObject().put("project", project).put("name", name).put("description", description).put("instruction", instruction))
+
+    // MCP Servers Manager API
+    suspend fun mcpServers(): JSONObject = request("GET", "/v1/mcp")
+    suspend fun upsertMcpServer(
+        id: String,
+        name: String,
+        transport: String = "stdio",
+        command: String = "",
+        args: List<String> = emptyList(),
+        url: String = "",
+        enabled: Boolean = true
+    ): JSONObject = request(
+        "POST",
+        "/v1/mcp/upsert",
+        JSONObject()
+            .put("id", id)
+            .put("name", name)
+            .put("transport", transport)
+            .put("command", command)
+            .put("args", org.json.JSONArray(args))
+            .put("url", url)
+            .put("enabled", enabled)
+    )
+    suspend fun toggleMcpServer(id: String, enabled: Boolean): JSONObject =
+        request("POST", "/v1/mcp/toggle", JSONObject().put("id", id).put("enabled", enabled))
+    suspend fun deleteMcpServer(id: String): JSONObject =
+        request("POST", "/v1/mcp/delete", JSONObject().put("id", id))
 }

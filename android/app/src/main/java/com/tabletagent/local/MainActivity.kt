@@ -63,6 +63,7 @@ import com.tabletagent.local.ui.SkillsDialog
 import com.tabletagent.local.ui.HapticFeedbackHelper
 import com.tabletagent.local.ui.HermesMemoryDialog
 import com.tabletagent.local.ui.InteractivePtyTerminal
+import com.tabletagent.local.ui.McpManagerDialog
 import com.tabletagent.local.ui.OfficialCliCard
 import com.tabletagent.local.ui.PhaseStepperBar
 import com.tabletagent.local.ui.ProviderApiKeysCard
@@ -156,6 +157,7 @@ fun TabletAgentApp() {
     var gitReviewDialog by remember { mutableStateOf(false) }
     var showCoolifyDialog by remember { mutableStateOf(false) }
     var showSkillsDialog by remember { mutableStateOf(false) }
+    var showMcpDialog by remember { mutableStateOf(false) }
     var showSlmManagerDialog by remember { mutableStateOf(false) }
     var pickerExpanded by remember { mutableStateOf(false) }
     var prompt by rememberSaveable { mutableStateOf("") }
@@ -628,6 +630,7 @@ fun TabletAgentApp() {
                         onOpenGit = { gitReviewDialog = true },
                         onOpenCoolify = { showCoolifyDialog = true },
                         onOpenSkills = { showSkillsDialog = true },
+                        onOpenMcp = { showMcpDialog = true },
                         onOpenSlm = { showSlmManagerDialog = true },
                         apks = detectedApks,
                         onInstallApk = launchInstallApk,
@@ -1313,6 +1316,12 @@ fun TabletAgentApp() {
                 tab = 0
                 prompt = if (prompt.isBlank()) slashCmd else "$slashCmd$prompt"
             }
+        )
+    }
+    if (showMcpDialog) {
+        McpManagerDialog(
+            api = api,
+            onDismiss = { showMcpDialog = false }
         )
     }
     }
@@ -2634,6 +2643,68 @@ private fun SettingsScreen(
                             } else {
                                 Text(if (isWebQaReady) "Reinstall" else "Install Web QA", style = MaterialTheme.typography.labelSmall)
                             }
+                        }
+                    }
+                }
+
+                // Background Survival & Battery Optimization Card
+                val pm = remember(context) { context.getSystemService(android.content.Context.POWER_SERVICE) as? android.os.PowerManager }
+                var ignoringBattery by remember {
+                    mutableStateOf(
+                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                            pm?.isIgnoringBatteryOptimizations(context.packageName) == true
+                        } else true
+                    )
+                }
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(12.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.BatteryChargingFull,
+                            null,
+                            tint = if (ignoringBattery) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(
+                                "Background Survival & Battery",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                if (ignoringBattery) "Unrestricted background execution enabled (WakeLock + Foreground Service active)"
+                                else "Battery optimization active — HUAWEI/Android may pause long tasks when screen is off",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (ignoringBattery) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        FilledTonalButton(
+                            onClick = {
+                                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                                    val intent = Intent(
+                                        android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                        Uri.parse("package:${context.packageName}")
+                                    )
+                                    runCatching { context.startActivity(intent) }.onFailure {
+                                        runCatching {
+                                            context.startActivity(Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+                                        }
+                                    }
+                                    ignoringBattery = pm?.isIgnoringBatteryOptimizations(context.packageName) == true
+                                }
+                            },
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                            modifier = Modifier.height(32.dp)
+                        ) {
+                            Text(if (ignoringBattery) "Allowed" else "Allow Unrestricted", style = MaterialTheme.typography.labelSmall)
                         }
                     }
                 }

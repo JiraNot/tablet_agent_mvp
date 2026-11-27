@@ -33,6 +33,7 @@ class AgentForegroundService : Service() {
     private var currentProject: String = ""
     private var currentStatus: String = "RUNNING"
     private var currentPrompt: String = ""
+    private val activeTaskIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -50,10 +51,16 @@ class AgentForegroundService : Service() {
                 currentProject = intent.getStringExtra(EXTRA_PROJECT) ?: "Workspace"
                 currentStatus = intent.getStringExtra(EXTRA_STATUS) ?: "QUEUED"
                 currentPrompt = intent.getStringExtra(EXTRA_PROMPT) ?: ""
+                if (currentTaskId.isNotBlank()) activeTaskIds.add(currentTaskId)
 
                 acquireWakeLock()
+                val title = if (activeTaskIds.size > 1) {
+                    "OmniDev Tablet (${activeTaskIds.size} chats running)"
+                } else {
+                    "OmniDev Tablet: $currentProject"
+                }
                 val notification = buildNotification(
-                    title = "OmniDev Tablet: $currentProject",
+                    title = title,
                     text = "[$currentStatus] ${currentPrompt.take(80)}"
                 )
 
@@ -70,8 +77,11 @@ class AgentForegroundService : Service() {
 
             ACTION_UPDATE -> {
                 val taskId = intent.getStringExtra(EXTRA_TASK_ID)
-                if (taskId != null && taskId == currentTaskId) {
-                    val status = intent.getStringExtra(EXTRA_STATUS)
+                val status = intent.getStringExtra(EXTRA_STATUS)
+                if (taskId != null && status != null && status in setOf("COMPLETED", "PLANNED", "NEEDS_VERIFICATION", "FAILED", "CANCELLED", "INTERRUPTED", "BLOCKED_SETUP")) {
+                    activeTaskIds.remove(taskId)
+                }
+                if (taskId != null && (taskId == currentTaskId || activeTaskIds.isNotEmpty())) {
                     if (!status.isNullOrBlank()) currentStatus = status
 
                     val details = intent.getStringExtra(EXTRA_DETAILS)
@@ -80,9 +90,14 @@ class AgentForegroundService : Service() {
                     } else {
                         "[$currentStatus] ${currentPrompt.take(80)}"
                     }
+                    val title = if (activeTaskIds.size > 1) {
+                        "OmniDev Tablet (${activeTaskIds.size} chats running)"
+                    } else {
+                        "OmniDev Tablet: $currentProject"
+                    }
 
                     val notification = buildNotification(
-                        title = "OmniDev Tablet: $currentProject",
+                        title = title,
                         text = text
                     )
                     val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -93,6 +108,7 @@ class AgentForegroundService : Service() {
             ACTION_CANCEL_TASK -> {
                 val taskId = intent.getStringExtra(EXTRA_TASK_ID) ?: currentTaskId
                 if (taskId.isNotBlank()) {
+                    activeTaskIds.remove(taskId)
                     serviceScope.launch {
                         try {
                             val token = SecureDeviceToken.get(applicationContext)
@@ -101,15 +117,20 @@ class AgentForegroundService : Service() {
                                 LocalApi(token, port).cancelTask(taskId)
                             }
                         } catch (_: Exception) {}
-                        stopServiceInternal()
+                        if (activeTaskIds.isEmpty()) stopServiceInternal()
                     }
-                } else {
+                } else if (activeTaskIds.isEmpty()) {
                     stopServiceInternal()
                 }
             }
 
             ACTION_STOP -> {
-                stopServiceInternal()
+                val taskId = intent.getStringExtra(EXTRA_TASK_ID)
+                if (!taskId.isNullOrBlank()) activeTaskIds.remove(taskId)
+                if (activeTaskIds.isEmpty() || taskId.isNullOrBlank()) {
+                    activeTaskIds.clear()
+                    stopServiceInternal()
+                }
             }
         }
 
@@ -117,15 +138,17 @@ class AgentForegroundService : Service() {
     }
 
     private fun acquireWakeLock() {
+        val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
         if (wakeLock == null) {
-            val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
             wakeLock = pm?.newWakeLock(
                 PowerManager.PARTIAL_WAKE_LOCK,
                 "TabletAgent:ForegroundExecutionWakeLock"
             )?.apply {
                 setReferenceCounted(false)
-                acquire(30 * 60 * 1000L) // 30 minutes safe ceiling
             }
+        }
+        wakeLock?.let {
+            if (!it.isHeld) it.acquire(4 * 60 * 60 * 1000L) // up to 4 hours; released when all tasks finish
         }
     }
 

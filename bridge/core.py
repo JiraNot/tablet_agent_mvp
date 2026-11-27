@@ -532,6 +532,7 @@ class LocalCore:
         self._coolify_runtime_url: str = ''
         self._coolify_runtime_token: str = ''
         self._ensure_coolify_cli()
+        self._ensure_browser_cli()
         self.adapters: dict[str, BaseAgentAdapter] = {
             'codex': CodexAdapter(),
             'claude': ClaudeCodeAdapter(),
@@ -620,6 +621,17 @@ class LocalCore:
                 enabled INTEGER NOT NULL DEFAULT 1,
                 updated_at REAL NOT NULL,
                 PRIMARY KEY(project, skill_id)
+            );
+            CREATE TABLE IF NOT EXISTS mcp_servers(
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                transport TEXT NOT NULL DEFAULT 'stdio',
+                command TEXT NOT NULL DEFAULT '',
+                args_json TEXT NOT NULL DEFAULT '[]',
+                url TEXT NOT NULL DEFAULT '',
+                env_json TEXT NOT NULL DEFAULT '{}',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                updated_at REAL NOT NULL
             );
             ''')
 
@@ -1345,8 +1357,20 @@ class LocalCore:
         queued_task = False
         with self.lock:
             with self._db() as db:
-                busy = db.execute("SELECT id FROM tasks WHERE project=? AND status IN ('PLANNING','WAITING_APPROVAL','EXECUTING','VERIFYING','REPAIRING') LIMIT 1", (project,)).fetchone()
-                if busy and not clean_tid:
+                if clean_tid:
+                    same_busy = db.execute(
+                        "SELECT id FROM tasks WHERE id=? AND status IN ('PLANNING','WAITING_APPROVAL','EXECUTING','VERIFYING','REPAIRING') LIMIT 1",
+                        (clean_tid,),
+                    ).fetchone()
+                    if same_busy:
+                        raise BridgeError('This conversation is currently running; wait or cancel first', 409)
+                busy_build = None
+                if mode == 'build':
+                    busy_build = db.execute(
+                        "SELECT id FROM tasks WHERE project=? AND mode='build' AND status IN ('WAITING_APPROVAL','EXECUTING','VERIFYING','REPAIRING') LIMIT 1",
+                        (project,),
+                    ).fetchone()
+                if busy_build and not clean_tid:
                     if use_worktree and shutil.which('git'):
                         clean_tid = str(uuid.uuid4())
                         self.create_worktree(project, clean_tid)
@@ -1355,8 +1379,8 @@ class LocalCore:
                         db.execute('INSERT INTO tasks(id,project,prompt,agent,mode,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)', (clean_tid,project,prompt,agent,mode,'QUEUED',now,now))
                         queued_task = True
                         self.task_queues.setdefault(project, []).append({'task_id': clean_tid, 'model': model, 'turn_prompt': prompt})
-                elif busy and clean_tid:
-                    raise BridgeError('Another turn is currently running in this project; wait or cancel first', 409)
+                elif busy_build and clean_tid:
+                    raise BridgeError('Another build turn is currently modifying this project; wait or use Plan mode in parallel', 409)
 
                 if not queued_task:
                     if clean_tid:
@@ -3734,6 +3758,112 @@ if __name__ == '__main__':
         except Exception:
             pass
 
+    def _ensure_browser_cli(self):
+        try:
+            bin_dir = self.home / 'bin'
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            cli_path = bin_dir / 'tablet-browser'
+            script = '''#!/bin/sh
+set -e
+CMD="${1:-}"
+if [ -z "$CMD" ] || [ "$CMD" = "-h" ] || [ "$CMD" = "--help" ]; then
+  echo "Usage: tablet-browser check <url> [--screenshot <path>] [--click <selector>] [--wait <ms>]"
+  exit 0
+fi
+NODE_PATH="$(npm root -g 2>/dev/null || true)"
+export NODE_PATH
+exec node - "$@" <<'NODE_EOF'
+const fs = require('fs');
+const path = require('path');
+
+async function main() {
+  const args = process.argv.slice(2);
+  const sub = args[0];
+  const url = args[1];
+  if (sub !== 'check' || !url) {
+    console.error('Usage: tablet-browser check <url> [--screenshot <path>] [--click <selector>] [--wait <ms>]');
+    process.exit(2);
+  }
+  const opt = (flag, def = '') => {
+    const i = args.indexOf(flag);
+    return i >= 0 && i + 1 < args.length ? args[i + 1] : def;
+  };
+  let pw;
+  try {
+    pw = require('playwright');
+  } catch (e) {
+    console.error('Playwright not found. Install Web QA Tools in Settings -> Runtime.');
+    process.exit(1);
+  }
+  const execPath = ['/usr/bin/chromium-browser', '/usr/bin/chromium', process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH]
+    .find(p => p && fs.existsSync(p));
+  if (!execPath) {
+    console.error('Chromium binary not found. Install Web QA Tools in Settings -> Runtime.');
+    process.exit(1);
+  }
+
+  const browser = await pw.chromium.launch({
+    executablePath: execPath,
+    headless: true,
+    args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+  });
+  const consoleErrors = [];
+  const pageErrors = [];
+  const httpErrors = [];
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    page.on('console', msg => { if (msg.type() === 'error') consoleErrors.push(msg.text()); });
+    page.on('pageerror', err => pageErrors.push(String(err)));
+    page.on('response', res => { if (res.status() >= 400) httpErrors.push(`${res.status()} ${res.url()}`); });
+    const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
+    const waitMs = parseInt(opt('--wait', '1200'), 10) || 1200;
+    await page.waitForTimeout(waitMs);
+    const clickSel = opt('--click', '');
+    if (clickSel) {
+      await page.click(clickSel, { timeout: 5000 });
+      await page.waitForTimeout(500);
+    }
+    const shotArg = opt('--screenshot', '');
+    const shotDir = path.join(process.cwd(), '.agents', 'screenshots');
+    fs.mkdirSync(shotDir, { recursive: true });
+    const shotPath = shotArg || path.join(shotDir, `qa_${Date.now()}.png`);
+    await page.screenshot({ path: shotPath, fullPage: true });
+    const title = await page.title();
+    const textSnippet = await page.evaluate(() => (document.body?.innerText || '').trim().slice(0, 800));
+    console.log(JSON.stringify({
+      url,
+      status: resp ? resp.status() : null,
+      title,
+      screenshot: shotPath,
+      console_errors: consoleErrors.slice(0, 20),
+      page_errors: pageErrors.slice(0, 20),
+      http_errors: httpErrors.slice(0, 20),
+      text_preview: textSnippet,
+    }, null, 2));
+  } finally {
+    await browser.close();
+  }
+}
+main().catch(err => { console.error(String(err)); process.exit(1); });
+NODE_EOF
+'''
+            cli_path.write_text(script, encoding='utf-8')
+            try:
+                cli_path.chmod(0o755)
+            except Exception:
+                pass
+            if os.name == 'posix':
+                try:
+                    sys_bin = Path('/usr/local/bin')
+                    if sys_bin.is_dir():
+                        sys_cli = sys_bin / 'tablet-browser'
+                        sys_cli.write_text(script, encoding='utf-8')
+                        sys_cli.chmod(0o755)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     @staticmethod
     def _build_web_qa_context() -> str:
         chromium_bin = shutil.which('chromium-browser') or shutil.which('chromium')
@@ -3742,10 +3872,10 @@ if __name__ == '__main__':
         os.environ.setdefault('PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD', '1')
         os.environ.setdefault('PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH', chromium_bin)
         return (
-            '\n\nWeb QA / Browser Testing Environment:\n'
-            f"- System Chromium (ARM64) is available at '{chromium_bin}'. "
-            "When running Playwright/Puppeteer in PRoot, pass executablePath and launch args: "
-            "['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu']."
+            '\n\nWeb QA / Browser Subagent Environment:\n'
+            f"- System Chromium (ARM64) is available at '{chromium_bin}' with Playwright.\n"
+            "- Use `tablet-browser check <url> [--click <css_selector>] [--wait <ms>]` to inspect live web apps: "
+            "it launches headless Chromium (--no-sandbox --disable-dev-shm-usage), captures DOM text, console/page/HTTP errors, and saves a screenshot in `.agents/screenshots/`."
         )
 
     def _get_coolify_link(self, project: str) -> dict[str, Any] | None:
@@ -4267,3 +4397,190 @@ if __name__ == '__main__':
             if sk:
                 lines.append(f"- [{sk['name']} (/{sid})]: {sk['instruction']}")
         return '\n'.join(lines) if len(lines) > 1 else ''
+
+    # ---- MCP (Model Context Protocol) Manager ----
+
+    MCP_PRESETS: list[dict[str, Any]] = [
+        {
+            'id': 'fetch',
+            'name': 'Fetch (Web Reader)',
+            'transport': 'stdio',
+            'command': 'npx',
+            'args': ['-y', '@modelcontextprotocol/server-fetch'],
+            'url': '',
+            'description': 'Fetch and convert web pages/APIs cleanly into Markdown for agents.',
+        },
+        {
+            'id': 'memory',
+            'name': 'Memory Graph',
+            'transport': 'stdio',
+            'command': 'npx',
+            'args': ['-y', '@modelcontextprotocol/server-memory'],
+            'url': '',
+            'description': 'Persistent knowledge graph memory across sessions.',
+        },
+        {
+            'id': 'filesystem',
+            'name': 'Filesystem (Workspaces)',
+            'transport': 'stdio',
+            'command': 'npx',
+            'args': ['-y', '@modelcontextprotocol/server-filesystem', '.'],
+            'url': '',
+            'description': 'Structured filesystem inspection tools.',
+        },
+        {
+            'id': 'postgres',
+            'name': 'PostgreSQL',
+            'transport': 'stdio',
+            'command': 'npx',
+            'args': ['-y', '@modelcontextprotocol/server-postgres'],
+            'url': '',
+            'description': 'Read-only SQL schema & query inspection (requires POSTGRES_CONNECTION_STRING env).',
+        },
+    ]
+
+    def list_mcp_servers(self) -> dict[str, Any]:
+        with self._db() as db:
+            rows = [dict(r) for r in db.execute('SELECT * FROM mcp_servers ORDER BY name').fetchall()]
+        servers: list[dict[str, Any]] = []
+        for r in rows:
+            try:
+                args = json.loads(r.get('args_json') or '[]')
+            except ValueError:
+                args = []
+            try:
+                env_raw = json.loads(r.get('env_json') or '{}')
+            except ValueError:
+                env_raw = {}
+            masked_env = {k: ('***' if str(v).strip() else '') for k, v in env_raw.items()} if isinstance(env_raw, dict) else {}
+            servers.append({
+                'id': r['id'],
+                'name': r['name'],
+                'transport': r['transport'],
+                'command': r['command'],
+                'args': args,
+                'url': r['url'],
+                'env_keys': list(masked_env.keys()),
+                'enabled': bool(r['enabled']),
+            })
+        return {'servers': servers, 'presets': self.MCP_PRESETS}
+
+    def upsert_mcp_server(
+        self,
+        server_id: str,
+        name: str,
+        transport: str = 'stdio',
+        command: str = '',
+        args: list[str] | None = None,
+        url: str = '',
+        env: dict[str, str] | None = None,
+        enabled: bool = True,
+    ) -> dict[str, Any]:
+        sid = re.sub(r'[^a-z0-9_-]+', '-', (server_id or name or '').strip().lower()).strip('-')
+        if not sid:
+            raise BridgeError('MCP server id or name is required', 400)
+        clean_name = (name or sid).strip()[:120]
+        tr = transport if transport in {'stdio', 'http'} else 'stdio'
+        if tr == 'stdio' and not (command or '').strip():
+            raise BridgeError('Command is required for stdio MCP server', 400)
+        if tr == 'http' and not (url or '').strip():
+            raise BridgeError('URL is required for http MCP server', 400)
+        args_list = [str(a) for a in (args or []) if str(a).strip()]
+        env_dict = {str(k).strip(): str(v) for k, v in (env or {}).items() if str(k).strip()}
+        now = time.time()
+        with self._db() as db:
+            db.execute(
+                'INSERT INTO mcp_servers(id,name,transport,command,args_json,url,env_json,enabled,updated_at) '
+                'VALUES(?,?,?,?,?,?,?,?,?) '
+                'ON CONFLICT(id) DO UPDATE SET '
+                'name=excluded.name, transport=excluded.transport, command=excluded.command, '
+                'args_json=excluded.args_json, url=excluded.url, env_json=excluded.env_json, '
+                'enabled=excluded.enabled, updated_at=excluded.updated_at',
+                (sid, clean_name, tr, (command or '').strip(), json.dumps(args_list), (url or '').strip(), json.dumps(env_dict), 1 if enabled else 0, now),
+            )
+        self._sync_mcp_to_clis()
+        return {'id': sid, 'name': clean_name, 'transport': tr, 'enabled': bool(enabled)}
+
+    def toggle_mcp_server(self, server_id: str, enabled: bool) -> dict[str, Any]:
+        sid = re.sub(r'[^a-z0-9_-]+', '-', (server_id or '').strip().lower()).strip('-')
+        if not sid:
+            raise BridgeError('MCP server ID is required', 400)
+        with self._db() as db:
+            cur = db.execute('UPDATE mcp_servers SET enabled=?, updated_at=? WHERE id=?', (1 if enabled else 0, time.time(), sid))
+            if cur.rowcount == 0:
+                raise BridgeError('MCP server not found', 404)
+        self._sync_mcp_to_clis()
+        return {'id': sid, 'enabled': bool(enabled)}
+
+    def delete_mcp_server(self, server_id: str) -> dict[str, Any]:
+        sid = re.sub(r'[^a-z0-9_-]+', '-', (server_id or '').strip().lower()).strip('-')
+        if not sid:
+            raise BridgeError('MCP server ID is required', 400)
+        with self._db() as db:
+            db.execute('DELETE FROM mcp_servers WHERE id=?', (sid,))
+        self._sync_mcp_to_clis()
+        return {'deleted': True, 'id': sid}
+
+    def _sync_mcp_to_clis(self):
+        with self._db() as db:
+            rows = [dict(r) for r in db.execute('SELECT * FROM mcp_servers WHERE enabled=1 ORDER BY id').fetchall()]
+        # 1. Sync to Claude Code (~/.claude.json)
+        try:
+            claude_cfg_path = Path.home() / '.claude.json'
+            claude_cfg: dict[str, Any] = {}
+            if claude_cfg_path.is_file():
+                try:
+                    claude_cfg = json.loads(claude_cfg_path.read_text(encoding='utf-8'))
+                    if not isinstance(claude_cfg, dict):
+                        claude_cfg = {}
+                except ValueError:
+                    claude_cfg = {}
+            mcp_map: dict[str, Any] = {}
+            for r in rows:
+                args = json.loads(r.get('args_json') or '[]')
+                env = json.loads(r.get('env_json') or '{}')
+                if r['transport'] == 'http':
+                    mcp_map[r['id']] = {'type': 'http', 'url': r['url']}
+                else:
+                    entry: dict[str, Any] = {'command': r['command'], 'args': args}
+                    if env:
+                        entry['env'] = env
+                    mcp_map[r['id']] = entry
+            claude_cfg['mcpServers'] = mcp_map
+            claude_cfg_path.write_text(json.dumps(claude_cfg, indent=2), encoding='utf-8')
+        except Exception:
+            pass
+
+        # 2. Sync to Codex CLI (~/.codex/config.toml managed block)
+        try:
+            codex_dir = Path.home() / '.codex'
+            codex_dir.mkdir(parents=True, exist_ok=True)
+            toml_path = codex_dir / 'config.toml'
+            existing = toml_path.read_text(encoding='utf-8') if toml_path.is_file() else ''
+            marker_start = '# --- BEGIN TABLET AGENT MCP ---'
+            marker_end = '# --- END TABLET AGENT MCP ---'
+            cleaned = re.sub(
+                rf'{re.escape(marker_start)}.*?{re.escape(marker_end)}\n?',
+                '',
+                existing,
+                flags=re.DOTALL,
+            ).rstrip()
+            block_lines = [marker_start]
+            for r in rows:
+                args = json.loads(r.get('args_json') or '[]')
+                env = json.loads(r.get('env_json') or '{}')
+                block_lines.append(f"[mcp_servers.{r['id']}]")
+                if r['transport'] == 'http':
+                    block_lines.append(f"url = {json.dumps(r['url'])}")
+                else:
+                    block_lines.append(f"command = {json.dumps(r['command'])}")
+                    block_lines.append(f"args = {json.dumps(args)}")
+                    if env:
+                        block_lines.append(f"[mcp_servers.{r['id']}.env]")
+                        for ek, ev in env.items():
+                            block_lines.append(f"{ek} = {json.dumps(str(ev))}")
+            block_lines.append(marker_end)
+            new_toml = (cleaned + '\n\n' if cleaned else '') + '\n'.join(block_lines) + '\n'
+            toml_path.write_text(new_toml, encoding='utf-8')
+        except Exception:
+            pass

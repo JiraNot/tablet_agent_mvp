@@ -266,6 +266,29 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200,self.core.toggle_skill(str(obj.get('project','')),str(obj.get('skill_id','')),bool(obj.get('enabled',True))))
             if seg[2]=='custom':
                 return self.reply(200,self.core.create_custom_skill(str(obj.get('project','')),str(obj.get('name','')),str(obj.get('description','')),str(obj.get('instruction',''))))
+        if seg==['v1','mcp'] and method=='GET':
+            return self.reply(200,self.core.list_mcp_servers())
+        if len(seg)==3 and seg[0]=='v1' and seg[1]=='mcp' and method=='POST':
+            obj=self._body()
+            if seg[2]=='upsert':
+                raw_args=obj.get('args',[])
+                args_list=[str(x) for x in raw_args] if isinstance(raw_args,list) else [x for x in str(raw_args).split() if x]
+                raw_env=obj.get('env',{})
+                env_dict={str(k):str(v) for k,v in raw_env.items()} if isinstance(raw_env,dict) else {}
+                return self.reply(200,self.core.upsert_mcp_server(
+                    str(obj.get('id','')),
+                    str(obj.get('name','')),
+                    transport=str(obj.get('transport','stdio')),
+                    command=str(obj.get('command','')),
+                    args=args_list,
+                    url=str(obj.get('url','')),
+                    env=env_dict,
+                    enabled=bool(obj.get('enabled',True)),
+                ))
+            if seg[2]=='toggle':
+                return self.reply(200,self.core.toggle_mcp_server(str(obj.get('id','')),bool(obj.get('enabled',True))))
+            if seg[2]=='delete':
+                return self.reply(200,self.core.delete_mcp_server(str(obj.get('id',''))))
         raise BridgeError('Endpoint not found',404)
 
     def handle_one_request(self):
