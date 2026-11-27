@@ -614,6 +614,13 @@ class LocalCore:
                 status TEXT NOT NULL DEFAULT '',
                 updated_at REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS project_skills(
+                project TEXT NOT NULL,
+                skill_id TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY(project, skill_id)
+            );
             ''')
 
     def _register_pid(self, key: str, proc: subprocess.Popen, cmd_hint: str):
@@ -1999,7 +2006,8 @@ class LocalCore:
             os.environ['TABLET_PROJECT'] = project_name
             thread = self._thread_for_project(project_name, agent_name)
             effective_prompt = turn_prompt if (turn_prompt and turn_prompt.strip()) else rec['prompt']
-            prompt_text = f'{policy}{instructions}{memory_ctx}{coolify_ctx}{web_qa_ctx}\n\nUser task:\n{effective_prompt}'
+            skills_ctx = self._build_skills_context(project_name, effective_prompt)
+            prompt_text = f'{policy}{instructions}{memory_ctx}{coolify_ctx}{web_qa_ctx}{skills_ctx}\n\nUser task:\n{effective_prompt}'
             settings = self.get_settings()
             sandbox_override = 'danger-full-access' if (agent_name == 'codex' and mode == 'build' and settings.get('codex_proot_sandbox_bypass')) else None
             use_app_server = bool(agent_name == 'codex' and isinstance(adapter, CodexAdapter) and settings.get('codex_use_app_server'))
@@ -4029,3 +4037,233 @@ if __name__ == '__main__':
             'project_uuid': project_uuid,
             'server_uuid': server_uuid,
         }
+
+    # ---- Agent Skills System (Built-in + Workspace .agents/skills) ----
+
+    BUILTIN_SKILLS: list[dict[str, str]] = [
+        {
+            'id': 'grill-me',
+            'name': 'Grill Me',
+            'category': 'Planning',
+            'description': 'Interview step-by-step on every branch of the design tree before coding.',
+            'instruction': (
+                'Interview the user relentlessly about every aspect of this plan until you reach a shared understanding. '
+                'Walk down each branch of the design tree, resolving dependencies one-by-one. '
+                'Ask one focused question at a time and provide your recommended answer. Do not write implementation code until requirements are clarified.'
+            ),
+        },
+        {
+            'id': 'ponytail',
+            'name': 'Ponytail',
+            'category': 'Polish',
+            'description': 'Tidy & polish pass: remove dead code, extract shared helpers, tighten edge cases & types.',
+            'instruction': (
+                'Perform a thorough Ponytail cleanup and polish pass on the target code: '
+                'remove dead code and unused imports, extract duplicated logic into clean single-purpose helpers, '
+                'tighten edge-case guards and naming, and re-run relevant tests/linters to verify nothing broke.'
+            ),
+        },
+        {
+            'id': 'impeccable',
+            'name': 'Impeccable',
+            'category': 'UI/UX',
+            'description': 'Elevate frontend/UI craft: hierarchy, typography, Light/Dark consistency, responsive & a11y.',
+            'instruction': (
+                'Apply Impeccable frontend design craft: establish crisp visual hierarchy, intentional typography and spacing, '
+                'consistent Light/Dark theme tokens (zero hardcoded clash colors), responsive tablet/mobile layouts, '
+                'accessible contrast, and polished micro-interactions without generic AI-slop.'
+            ),
+        },
+        {
+            'id': 'tdd-verify',
+            'name': 'TDD & Verify',
+            'category': 'QA',
+            'description': 'Write/run real automated tests before claiming completion; zero unverified claims.',
+            'instruction': (
+                'Follow strict TDD and verification: write or update automated tests covering both happy paths and failure cases, '
+                'execute the real test/build commands, and report only directly observed results.'
+            ),
+        },
+        {
+            'id': 'coolify-deploy-debug',
+            'name': 'Coolify Deploy',
+            'category': 'DevOps',
+            'description': 'Inspect Coolify status/logs, optimize Dockerfile/Compose cache, or create staging.',
+            'instruction': (
+                'Use `tablet-coolify` (status, deployments, logs, create-staging) to inspect real Coolify build/runtime state, '
+                'optimize Docker build caching and healthchecks, and verify deployment logs without exposing secrets.'
+            ),
+        },
+        {
+            'id': 'security-audit',
+            'name': 'Security Audit',
+            'category': 'Security',
+            'description': 'Audit for secret leaks, missing auth checks, path traversal, and injection risks.',
+            'instruction': (
+                'Audit the touched code for security vulnerabilities: ensure .env/tokens/keys are never logged or leaked, '
+                'validate all file paths against workspace boundaries, enforce auth on endpoints, and avoid unsafe shell strings.'
+            ),
+        },
+        {
+            'id': 'web-qa-playwright',
+            'name': 'Web QA (Playwright)',
+            'category': 'QA',
+            'description': 'Verify live web UI using ARM64 Chromium + Playwright with --no-sandbox.',
+            'instruction': (
+                'Verify the web app in a real headless browser using Chromium ARM64 + Playwright '
+                '(passing executablePath and args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]). '
+                'Check console errors, layout/responsive rendering, and core interactive flows.'
+            ),
+        },
+    ]
+
+    def _scan_workspace_skills(self, project: str) -> list[dict[str, str]]:
+        if not project:
+            return []
+        try:
+            p_dir = self._project(project)
+        except Exception:
+            return []
+        found: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for rel_root in ('.agents/skills', '.claude/skills'):
+            root = p_dir / rel_root
+            if not root.is_dir():
+                continue
+            for entry in sorted(root.iterdir()):
+                if not entry.is_dir():
+                    continue
+                skill_md = entry / 'SKILL.md'
+                if not skill_md.is_file():
+                    continue
+                sid = re.sub(r'[^a-z0-9_-]', '-', entry.name.lower()).strip('-')
+                if not sid or sid in seen:
+                    continue
+                seen.add(sid)
+                try:
+                    raw = skill_md.read_text(encoding='utf-8')[:4000]
+                except Exception:
+                    continue
+                name = entry.name
+                desc = 'Workspace custom skill'
+                body = raw
+                m_fm = re.match(r'^---\s*\n(.*?)\n---\s*\n(.*)$', raw, re.DOTALL)
+                if m_fm:
+                    fm, body = m_fm.group(1), m_fm.group(2)
+                    for line in fm.splitlines():
+                        if line.lower().startswith('name:'):
+                            name = line.split(':', 1)[1].strip().strip('"\'') or name
+                        elif line.lower().startswith('description:'):
+                            desc = line.split(':', 1)[1].strip().strip('"\'') or desc
+                found.append({
+                    'id': sid,
+                    'name': name,
+                    'category': 'Custom',
+                    'description': desc[:160],
+                    'instruction': REDACTION.sub('[REDACTED]', body.strip()[:2000]),
+                    'source': 'workspace',
+                })
+        return found
+
+    def list_skills(self, project: str = '') -> list[dict[str, Any]]:
+        enabled_ids: set[str] = set()
+        if project:
+            with self._db() as db:
+                rows = db.execute(
+                    'SELECT skill_id FROM project_skills WHERE project=? AND enabled=1',
+                    (project,),
+                ).fetchall()
+                enabled_ids = {str(r['skill_id']) for r in rows}
+
+        items: list[dict[str, Any]] = []
+        builtin_ids: set[str] = set()
+        for s in self.BUILTIN_SKILLS:
+            builtin_ids.add(s['id'])
+            items.append({
+                'id': s['id'],
+                'name': s['name'],
+                'category': s['category'],
+                'description': s['description'],
+                'slash': f"/{s['id']}",
+                'source': 'builtin',
+                'enabled': s['id'] in enabled_ids,
+            })
+        for ws in self._scan_workspace_skills(project):
+            if ws['id'] in builtin_ids:
+                continue
+            items.append({
+                'id': ws['id'],
+                'name': ws['name'],
+                'category': ws['category'],
+                'description': ws['description'],
+                'slash': f"/{ws['id']}",
+                'source': 'workspace',
+                'enabled': ws['id'] in enabled_ids,
+            })
+        return items
+
+    def toggle_skill(self, project: str, skill_id: str, enabled: bool) -> dict[str, Any]:
+        self._project(project)
+        sid = re.sub(r'[^a-zA-Z0-9_-]', '', (skill_id or '').strip().lower())
+        if not sid:
+            raise BridgeError('Skill ID is required', 400)
+        now = time.time()
+        with self._db() as db:
+            db.execute(
+                'INSERT INTO project_skills(project, skill_id, enabled, updated_at) VALUES(?,?,?,?) '
+                'ON CONFLICT(project, skill_id) DO UPDATE SET enabled=excluded.enabled, updated_at=excluded.updated_at',
+                (project, sid, 1 if enabled else 0, now),
+            )
+        return {'project': project, 'skill_id': sid, 'enabled': bool(enabled)}
+
+    def create_custom_skill(self, project: str, name: str, description: str, instruction: str) -> dict[str, Any]:
+        p_dir = self._project(project)
+        clean_name = (name or '').strip()
+        clean_instr = (instruction or '').strip()
+        if not clean_name or not clean_instr:
+            raise BridgeError('Skill name and instruction are required', 400)
+        sid = re.sub(r'[^a-z0-9_-]+', '-', clean_name.lower()).strip('-') or 'custom-skill'
+        skill_dir = p_dir / '.agents' / 'skills' / sid
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        clean_desc = (description or clean_name).strip().replace('\n', ' ')[:160]
+        content = f"---\nname: {clean_name}\ndescription: {clean_desc}\n---\n\n{clean_instr}\n"
+        (skill_dir / 'SKILL.md').write_text(content, encoding='utf-8')
+        self.toggle_skill(project, sid, True)
+        return {
+            'id': sid,
+            'name': clean_name,
+            'category': 'Custom',
+            'description': clean_desc,
+            'slash': f'/{sid}',
+            'source': 'workspace',
+            'enabled': True,
+        }
+
+    def _build_skills_context(self, project: str, prompt_text: str) -> str:
+        catalog: dict[str, dict[str, str]] = {s['id']: s for s in self.BUILTIN_SKILLS}
+        for ws in self._scan_workspace_skills(project):
+            catalog.setdefault(ws['id'], ws)
+
+        enabled_ids: set[str] = set()
+        if project:
+            with self._db() as db:
+                rows = db.execute(
+                    'SELECT skill_id FROM project_skills WHERE project=? AND enabled=1',
+                    (project,),
+                ).fetchall()
+                enabled_ids = {str(r['skill_id']) for r in rows}
+
+        # Also activate any skill referenced inline via `/skill-id` in the prompt
+        lower_prompt = (prompt_text or '').lower()
+        for sid in catalog:
+            if re.search(rf'(?:^|\s)/{re.escape(sid)}(?:\s|$|[,.!?])', lower_prompt):
+                enabled_ids.add(sid)
+
+        if not enabled_ids:
+            return ''
+        lines = ['\n\nActive Agent Skills (follow these behavioral instructions):']
+        for sid in sorted(enabled_ids):
+            sk = catalog.get(sid)
+            if sk:
+                lines.append(f"- [{sk['name']} (/{sid})]: {sk['instruction']}")
+        return '\n'.join(lines) if len(lines) > 1 else ''

@@ -673,6 +673,7 @@ fun ClaudeCodeTopBar(
     onSelectWorkspaceView: (Int) -> Unit,
     onOpenGit: () -> Unit,
     onOpenCoolify: () -> Unit = {},
+    onOpenSkills: () -> Unit = {},
     onOpenSlm: () -> Unit = {},
     apks: List<JSONObject> = emptyList(),
     onInstallApk: (String) -> Unit = {},
@@ -899,6 +900,23 @@ fun ClaudeCodeTopBar(
                             Icon(
                                 Icons.Default.RocketLaunch,
                                 contentDescription = "Coolify",
+                                modifier = Modifier.size(14.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        // Compact Icon Button for Agent Skills
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier
+                                .size(28.dp)
+                                .clip(RoundedCornerShape(7.dp))
+                                .background(MaterialTheme.colorScheme.surfaceVariant)
+                                .clickable { onOpenSkills() }
+                        ) {
+                            Icon(
+                                Icons.Default.AutoAwesome,
+                                contentDescription = "Skills",
                                 modifier = Modifier.size(14.dp),
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -2911,6 +2929,31 @@ fun AionClaudeAgentPane(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(Modifier.fillMaxWidth()) {
+                    if (prompt.startsWith("/") && !prompt.contains(" ") && prompt.length <= 24) {
+                        val q = prompt.removePrefix("/").lowercase()
+                        val slashSkills = listOf(
+                            "/grill-me" to "Interview spec",
+                            "/ponytail" to "Tidy & polish",
+                            "/impeccable" to "UI/UX craft",
+                            "/tdd-verify" to "Test & verify",
+                            "/coolify-deploy-debug" to "Coolify logs",
+                            "/security-audit" to "Security audit",
+                            "/web-qa-playwright" to "Playwright E2E"
+                        ).filter { q.isBlank() || it.first.contains(q) }
+                        if (slashSkills.isNotEmpty()) {
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 14.dp, vertical = 4.dp)
+                            ) {
+                                slashSkills.forEach { (cmd, hint) ->
+                                    SuggestionChip(
+                                        onClick = { onPrompt("$cmd ") },
+                                        label = { Text("$cmd · $hint", fontSize = 11.sp) }
+                                    )
+                                }
+                            }
+                        }
+                    }
                     if (attachments.isNotEmpty()) {
                         AttachmentChipsRow(
                             attachments = attachments,

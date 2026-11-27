@@ -257,6 +257,15 @@ class Handler(BaseHTTPRequestHandler):
                     build_pack=str(obj.get('build_pack','')),
                     name=str(obj.get('name','')),
                 ))
+        if seg==['v1','skills'] and method=='GET':
+            proj=str(q.get('project',[''])[0])
+            return self.reply(200,{'skills':self.core.list_skills(proj)})
+        if len(seg)==3 and seg[0]=='v1' and seg[1]=='skills' and method=='POST':
+            obj=self._body()
+            if seg[2]=='toggle':
+                return self.reply(200,self.core.toggle_skill(str(obj.get('project','')),str(obj.get('skill_id','')),bool(obj.get('enabled',True))))
+            if seg[2]=='custom':
+                return self.reply(200,self.core.create_custom_skill(str(obj.get('project','')),str(obj.get('name','')),str(obj.get('description','')),str(obj.get('instruction',''))))
         raise BridgeError('Endpoint not found',404)
 
     def handle_one_request(self):

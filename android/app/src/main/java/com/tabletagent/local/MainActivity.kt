@@ -59,6 +59,7 @@ import com.tabletagent.local.ui.CliOAuthDialog
 import com.tabletagent.local.ui.CodeEditorWithLineNumbers
 import com.tabletagent.local.ui.CoolifyDialog
 import com.tabletagent.local.ui.GitHubUnifiedAccountCard
+import com.tabletagent.local.ui.SkillsDialog
 import com.tabletagent.local.ui.HapticFeedbackHelper
 import com.tabletagent.local.ui.HermesMemoryDialog
 import com.tabletagent.local.ui.InteractivePtyTerminal
@@ -154,6 +155,7 @@ fun TabletAgentApp() {
     var previousCloudAgent by rememberSaveable { mutableStateOf("codex") }
     var gitReviewDialog by remember { mutableStateOf(false) }
     var showCoolifyDialog by remember { mutableStateOf(false) }
+    var showSkillsDialog by remember { mutableStateOf(false) }
     var showSlmManagerDialog by remember { mutableStateOf(false) }
     var pickerExpanded by remember { mutableStateOf(false) }
     var prompt by rememberSaveable { mutableStateOf("") }
@@ -625,6 +627,7 @@ fun TabletAgentApp() {
                         },
                         onOpenGit = { gitReviewDialog = true },
                         onOpenCoolify = { showCoolifyDialog = true },
+                        onOpenSkills = { showSkillsDialog = true },
                         onOpenSlm = { showSlmManagerDialog = true },
                         apks = detectedApks,
                         onInstallApk = launchInstallApk,
@@ -1298,6 +1301,17 @@ fun TabletAgentApp() {
                 showCoolifyDialog = false
                 tab = 0
                 prompt = deployPrompt
+            }
+        )
+    }
+    if (showSkillsDialog) {
+        SkillsDialog(
+            api = api,
+            selectedProject = selectedProject,
+            onDismiss = { showSkillsDialog = false },
+            onInsertSlashCommand = { slashCmd ->
+                tab = 0
+                prompt = if (prompt.isBlank()) slashCmd else "$slashCmd$prompt"
             }
         )
     }

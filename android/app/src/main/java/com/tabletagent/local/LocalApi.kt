@@ -218,4 +218,12 @@ class LocalApi(private val deviceToken: String, port: Int = 8765) {
             .put("build_pack", buildPack)
             .put("name", name)
     )
+
+    // Agent Skills API
+    suspend fun skills(project: String = ""): JSONObject =
+        request("GET", if (project.isBlank()) "/v1/skills" else "/v1/skills?project=${encode(project)}")
+    suspend fun toggleSkill(project: String, skillId: String, enabled: Boolean): JSONObject =
+        request("POST", "/v1/skills/toggle", JSONObject().put("project", project).put("skill_id", skillId).put("enabled", enabled))
+    suspend fun createCustomSkill(project: String, name: String, description: String, instruction: String): JSONObject =
+        request("POST", "/v1/skills/custom", JSONObject().put("project", project).put("name", name).put("description", description).put("instruction", instruction))
 }
