@@ -86,3 +86,10 @@ States: `QUEUED`, `PLANNING`, `WAITING_APPROVAL`, `EXECUTING`, `VERIFYING`, `REP
 ### 6. 100% Offline Local Small Language Model (SLM via llama.cpp)
 - **`GET /v1/slm/status`**: Returns local llama.cpp runtime & model presence: `{"installed": true, "binary": "llama-cli", "models": ["qwen2.5-coder-1.5b-q4.gguf"], "default_model": "qwen2.5-coder-1.5b-q4"}`.
 - **`POST /v1/slm/setup`**: Downloads/provisions local GGUF weights into the embedded runtime for 100% offline agent operation without cloud API keys.
+
+### 7. MCP (Model Context Protocol) Manager & Concurrent Plan Chats
+- **`GET /v1/mcp`**: Returns `{"servers": [...], "presets": [...]}` with `env` secret values masked (`"***"`).
+- **`POST /v1/mcp/upsert`**: Adds or updates an MCP server (`name`, `command`, `args`, `env`, `enabled`, `description`) and syncs enabled entries to `~/.claude.json` and `~/.codex/config.toml`.
+- **`POST /v1/mcp/toggle`**: Enables or disables an MCP server (`{"name": "...", "enabled": true}`) and re-syncs CLI configs.
+- **`POST /v1/mcp/delete`**: Deletes an MCP server (`{"name": "..."}`) and re-syncs CLI configs.
+- **Concurrent Chats (`POST /v1/projects/{name}/tasks`)**: Multiple `plan` (read-only) tasks and cross-project tasks run concurrently; only conflicting `mode == "build"` writes in the same project are blocked (`409` / queued).
